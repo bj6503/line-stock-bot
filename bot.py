@@ -1,48 +1,62 @@
 import os
 import requests
 import anthropic
+import datetime
 from analyzer import get_top_picks
-from news import get_sentiment
 
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID = os.environ["LINE_USER_ID"]
 ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"]
 
-STOCK_NAMES = {
-    "2330.TW": "台積電",
-    "2317.TW": "鴻海",
-    "2454.TW": "聯發科",
-    "2382.TW": "廣達",
-    "3008.TW": "大立光",
-}
-
-def build_ai_summary(picks):
+def build_ai_summary(picks: list) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
     stock_info = ""
-    for p in picks:
-        name = STOCK_NAMES.get(p["ticker"], p["ticker"])
-        news = get_sentiment(name)
+    for i, p in enumerate(picks, 1):
         stock_info += f"""
-股票：{name} ({p['ticker']})
-現價：{p['price']:.1f}
-技術評分：{p['score']}/6
-訊號：{', '.join(p['signals'])}
-新聞情緒：{news['sentiment']}
-近期標題：{news['headlines'][0] if news['headlines'] else '無'}
+第{i}名 {p['ticker']}
+現價：{p['price']:.1f} 元
+綜合評分：{p['score']}分
+技術訊號：{', '.join(p['signals'])}
+建議買進：{p['price']:.1f} 元附近
+目標價：{p['target']} 元 (+5%)
+停損價：{p['stop']} 元 (-3%)
+建議股數：{p['shares']} 股
 """
+
     prompt = (
-        "你是一位台灣股市分析師。請根據以下技術分析與新聞情緒，用繁體中文撰寫今日股票推薦摘要。\n"
+        "你是一位台灣股市短線分析師。以下是今日全市場掃描綜合評分前10名股票資料。\n"
+        "請用繁體中文為每支股票寫一段30字以內的簡短操作建議，說明為何值得關注。\n"
+        "結尾加上一句風險提示。不要使用markdown符號。\n\n"
         + stock_info
-        + "\n要求：\n- 每檔股票一段，50字以內\n- 語氣專業但易懂\n- 結尾加上風險提示一句話\n- 不要使用markdown符號"
     )
+
     msg = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=600,
+        max_tokens=1000,
         messages=[{"role": "user", "content": prompt}]
     )
     return msg.content[0].text
 
-def send_line_message(text):
+def build_message(picks: list, summary: str) -> str:
+    date_str = datetime.date.today().strftime("%m/%d")
+    lines = [f"📈 {date_str} 全市場掃描前10名", "─" * 20]
+
+    for i, p in enumerate(picks, 1):
+        lines.append(
+            f"#{i} {p['ticker']}｜現價 {p['price']:.1f}\n"
+            f"🎯目標 {p['target']} ｜🛑停損 {p['stop']}\n"
+            f"📊{' '.join(p['signals'])}\n"
+            f"💰建議買 {p['shares']} 股"
+        )
+        lines.append("─" * 20)
+
+    lines.append("📝 AI分析：")
+    lines.append(summary)
+    lines.append("\n⚠️ 以上僅供參考，請自行判斷風險。")
+    return "\n".join(lines)
+
+def send_line_message(text: str):
     headers = {
         "Authorization": "Bearer " + LINE_TOKEN,
         "Content-Type": "application/json"
@@ -56,18 +70,24 @@ def send_line_message(text):
         json=body, headers=headers
     )
     print("LINE 推播狀態: " + str(r.status_code))
+    if r.status_code != 200:
+        print(r.text)
 
 def main():
-    import datetime
-    print("開始分析股票...")
-    picks = get_top_picks(n=3)
+    print("開始全市場掃描...")
+    picks = get_top_picks(n=10)
+
     if not picks:
-        print("無推薦股票")
+        print("今日無符合條件股票")
+        send_line_message("今日全市場掃描無符合條件股票，請留意市場狀況。")
         return
-    print("呼叫 Claude 生成摘要...")
+
+    print("呼叫 Claude 生成分析...")
     summary = build_ai_summary(picks)
-    date_str = datetime.date.today().strftime("%m/%d")
-    message = "📈 " + date_str + " 今日股票推薦\n" + "─" * 20 + "\n" + summary
+
+    print("組合訊息...")
+    message = build_message(picks, summary)
+
     print("推播到 LINE...")
     send_line_message(message)
     print("完成！")
