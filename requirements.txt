@@ -1,6 +1,6 @@
 yfinance
 pandas
-pandas-ta
+ta
 requests
 anthropic
 feedparser
