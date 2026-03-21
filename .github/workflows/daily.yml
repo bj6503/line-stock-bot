@@ -2,7 +2,11 @@ name: Daily Stock Bot
 
 on:
   schedule:
-    - cron: '30 0 * * 1-5'
+    - cron: '30 0 * * 1-5'   # 早上 08:30 全市場掃描
+    - cron: '0 2 * * 1-5'    # 10:00 盤中檢查
+    - cron: '30 3 * * 1-5'   # 11:30 盤中檢查
+    - cron: '0 5 * * 1-5'    # 13:00 盤中檢查
+    - cron: '30 6 * * 1-5'   # 14:30 盤中檢查
   workflow_dispatch:
 
 jobs:
@@ -10,17 +14,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: 安裝套件
         run: pip install -r requirements.txt
-      
-      - name: 執行機器人
+
+      - name: 判斷執行模式
+        id: mode
+        run: |
+          HOUR=$(date -u +%H)
+          MIN=$(date -u +%M)
+          if [ "$HOUR" = "00" ] && [ "$MIN" = "30" ]; then
+            echo "mode=morning" >> $GITHUB_OUTPUT
+          else
+            echo "mode=monitor" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 早盤掃描
+        if: steps.mode.outputs.mode == 'morning'
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python bot.py
+
+      - name: 盤中監控
+        if: steps.mode.outputs.mode == 'monitor'
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python monitor.py
