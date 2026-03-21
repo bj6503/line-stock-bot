@@ -1,5 +1,5 @@
 import yfinance as yf
-import pandas_ta as ta
+import ta
 import pandas as pd
 
 WATCHLIST = ["2330.TW", "2317.TW", "2454.TW", "2382.TW", "3008.TW"]
@@ -10,28 +10,32 @@ def analyze_stock(ticker: str) -> dict:
         return None
 
     close = df["Close"].squeeze()
+    high = df["High"].squeeze()
+    low = df["Low"].squeeze()
 
     # KD (Stochastic)
-    stoch = ta.stoch(df["High"].squeeze(), df["Low"].squeeze(), close)
-    k = stoch["STOCHk_14_3_3"].iloc[-1]
-    d = stoch["STOCHd_14_3_3"].iloc[-1]
+    k = ta.momentum.StochasticOscillator(high, low, close).stoch()
+    d = ta.momentum.StochasticOscillator(high, low, close).stoch_signal()
 
     # MACD
-    macd = ta.macd(close)
-    macd_val = macd["MACD_12_26_9"].iloc[-1]
-    macd_sig = macd["MACDs_12_26_9"].iloc[-1]
+    macd_obj = ta.trend.MACD(close)
+    macd_val = macd_obj.macd().iloc[-1]
+    macd_sig = macd_obj.macd_signal().iloc[-1]
 
     # RSI
-    rsi = ta.rsi(close).iloc[-1]
+    rsi = ta.momentum.RSIIndicator(close).rsi().iloc[-1]
+
+    k_val = k.iloc[-1]
+    d_val = d.iloc[-1]
 
     # 計分邏輯
     score = 0
     signals = []
 
-    if k < 20 and k > d:
+    if k_val < 20 and k_val > d_val:
         score += 2
         signals.append("KD黃金交叉(超賣區)")
-    elif k > 80:
+    elif k_val > 80:
         score -= 1
         signals.append("KD超買")
 
@@ -54,7 +58,7 @@ def analyze_stock(ticker: str) -> dict:
         "price": float(close.iloc[-1]),
         "score": score,
         "signals": signals,
-        "k": k, "d": d, "rsi": rsi,
+        "k": k_val, "d": d_val, "rsi": rsi,
         "macd": macd_val
     }
 
