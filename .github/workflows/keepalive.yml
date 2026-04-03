@@ -1,0 +1,23 @@
+name: Keep Alive
+
+on:
+  schedule:
+    - cron: '0 12 * * 0'  # 每週日 UTC 12:00 自動執行
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 保持活躍
+        run: |
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          echo "Last keepalive: $(date)" > .keepalive
+          git add .keepalive
+          git commit -m "keepalive: $(date)" || echo "nothing to commit"
+          git push
