@@ -19,43 +19,34 @@ on:
           - monitor
 
 jobs:
-  run-bot:
+  morning-scan:
     runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'morning' || github.event_name == 'schedule' && startsWith(github.event.schedule, '30 0')
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: 安裝套件
         run: pip install -r requirements.txt
-
-      - name: 判斷執行模式
-        id: mode
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "mode=${{ inputs.mode }}" >> $GITHUB_OUTPUT
-          else
-            HOUR=$(date -u +%H)
-            MIN=$(date -u +%M)
-            if [ "$HOUR" = "00" ] && [ "$MIN" = "30" ]; then
-              echo "mode=morning" >> $GITHUB_OUTPUT
-            else
-              echo "mode=monitor" >> $GITHUB_OUTPUT
-            fi
-          fi
-
       - name: 早盤掃描
-        if: steps.mode.outputs.mode == 'morning'
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python bot.py
 
+  monitor-scan:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'monitor' || github.event_name == 'schedule' && !startsWith(github.event.schedule, '30 0')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安裝套件
+        run: pip install -r requirements.txt
       - name: 盤中監控
-        if: steps.mode.outputs.mode == 'monitor'
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
