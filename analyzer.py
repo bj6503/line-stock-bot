@@ -68,6 +68,10 @@ def analyze_stock(ticker: str, foreign_buy: set) -> dict:
         d_val = d.iloc[-1]
         price = float(close.iloc[-1])
 
+        # 只推薦 500 元以上的股票
+        if price < 500:
+            return None
+
         score = 0
         signals = []
 
@@ -108,13 +112,12 @@ def analyze_stock(ticker: str, foreign_buy: set) -> dict:
         if score <= 0:
             return None
 
-        # 100元以下需要評分至少5分才推薦
-        if price < 100 and score < 5:
-            return None
-
         target = round(price * 1.05, 1)
         stop = round(price * 0.97, 1)
-        shares = int(BUDGET * POSITION_RATIO / price / 1000) * 1000
+
+        # 零股計算（用 25% 資金買零股）
+        budget = BUDGET * POSITION_RATIO
+        shares = int(budget / price)  # 零股，不用乘以1000
 
         return {
             "ticker": ticker,
@@ -125,6 +128,7 @@ def analyze_stock(ticker: str, foreign_buy: set) -> dict:
             "target": target,
             "stop": stop,
             "shares": shares,
+            "is_odd_lot": True
         }
     except Exception:
         return None
