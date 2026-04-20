@@ -2,22 +2,25 @@ name: Keep Alive
 
 on:
   schedule:
-    - cron: '0 12 * * 0'  # 每週日 UTC 12:00 自動執行
+    - cron: '0 12 * * 0'
   workflow_dispatch:
 
 jobs:
   keepalive:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: 保持活躍
         run: |
-          git config user.email "action@github.com"
-          git config user.name "GitHub Action"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
           echo "Last keepalive: $(date)" > .keepalive
           git add .keepalive
-          git commit -m "keepalive: $(date)" || echo "nothing to commit"
+          git diff --staged --quiet || git commit -m "keepalive: $(date)"
           git push
