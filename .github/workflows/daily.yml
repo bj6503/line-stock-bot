@@ -2,12 +2,12 @@ name: Daily Stock Bot
 
 on:
   schedule:
-    - cron: '30 0 * * 1-5'    # 台灣 08:30 早盤掃描
-    - cron: '0 2 * * 1-5'     # 台灣 10:00 盤中監控
-    - cron: '30 3 * * 1-5'    # 台灣 11:30 盤中監控
-    - cron: '0 5 * * 1-5'     # 台灣 13:00 盤中監控
-    - cron: '30 6 * * 1-5'    # 台灣 14:30 盤中監控
-    - cron: '0 1 1 * *'       # 每月1日 09:00 更新股票清單
+    - cron: '30 0 * * 1-5'
+    - cron: '0 2 * * 1-5'
+    - cron: '30 3 * * 1-5'
+    - cron: '0 5 * * 1-5'
+    - cron: '30 6 * * 1-5'
+    - cron: '0 1 1 * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -21,69 +21,50 @@ on:
           - update_watchlist
 
 jobs:
-  morning-scan:
+  run-bot:
     runs-on: ubuntu-latest
-    if: >
-      (github.event_name == 'workflow_dispatch' && inputs.mode == 'morning') ||
-      (github.event_name == 'schedule' && github.event.schedule == '30 0 * * 1-5')
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: 安裝套件
-        run: pip install -r requirements.txt
-      - name: 早盤掃描
-        env:
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python bot.py
-
-  monitor-scan:
-    runs-on: ubuntu-latest
-    if: >
-      (github.event_name == 'workflow_dispatch' && inputs.mode == 'monitor') ||
-      (github.event_name == 'schedule' && (
-        github.event.schedule == '0 2 * * 1-5' ||
-        github.event.schedule == '30 3 * * 1-5' ||
-        github.event.schedule == '0 5 * * 1-5' ||
-        github.event.schedule == '30 6 * * 1-5'
-      ))
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: 安裝套件
-        run: pip install -r requirements.txt
-      - name: 盤中監控
-        env:
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python monitor.py
-
-  update-watchlist:
-    runs-on: ubuntu-latest
-    if: >
-      (github.event_name == 'workflow_dispatch' && inputs.mode == 'update_watchlist') ||
-      (github.event_name == 'schedule' && github.event.schedule == '0 1 1 * *')
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: 安裝套件
         run: pip install -r requirements.txt
-      - name: 更新500元以上股票清單
-        run: python update_watchlist.py
-      - name: 儲存清單到repo
+
+      - name: 執行
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git add watchlist.json
-          git diff --staged --quiet || git commit -m "update watchlist: $(date)"
-          git push
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MODE="${{ inputs.mode }}"
+          else
+            HOUR=$(date -u +%H)
+            MIN=$(date -u +%M)
+            DAY=$(date -u +%d)
+            if [ "$DAY" = "01" ] && [ "$HOUR" = "01" ] && [ "$MIN" = "00" ]; then
+              MODE="update_watchlist"
+            elif [ "$HOUR" = "00" ] && [ "$MIN" = "30" ]; then
+              MODE="morning"
+            else
+              MODE="monitor"
+            fi
+          fi
+          echo "執行模式: $MODE"
+          if [ "$MODE" = "morning" ]; then
+            python bot.py
+          elif [ "$MODE" = "monitor" ]; then
+            python monitor.py
+          elif [ "$MODE" = "update_watchlist" ]; then
+            python update_watchlist.py
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git config user.name "github-actions[bot]"
+            git add watchlist.json
+            git diff --staged --quiet || git commit -m "update watchlist: $(date)"
+            git push
+          fi
