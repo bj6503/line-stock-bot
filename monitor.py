@@ -7,6 +7,26 @@ from analyzer import get_top_picks
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID = os.environ["LINE_USER_ID"]
 
+MAX_ALERTS_PER_RUN = 2   # 每次監控最多發2則
+MAX_ALERTS_PER_DAY = 7   # 每天最多發7則（加上早盤1則=8則）
+ALERT_LOG = "/tmp/alert_count.txt"
+
+def get_today_alert_count() -> int:
+    try:
+        if os.path.exists(ALERT_LOG):
+            with open(ALERT_LOG, "r") as f:
+                data = f.read().strip().split(",")
+                date, count = data[0], int(data[1])
+                if date == str(datetime.date.today()):
+                    return count
+    except Exception:
+        pass
+    return 0
+
+def save_today_alert_count(count: int):
+    with open(ALERT_LOG, "w") as f:
+        f.write(f"{datetime.date.today()},{count}")
+
 def get_stock_names() -> dict:
     names = {}
     try:
@@ -57,6 +77,14 @@ def get_current_price(ticker: str) -> float:
 
 def monitor():
     print("開始盤中監控...")
+
+    today_count = get_today_alert_count()
+    print(f"今日已發送 {today_count} 則提醒")
+
+    if today_count >= MAX_ALERTS_PER_DAY:
+        print(f"今日已達上限 {MAX_ALERTS_PER_DAY} 則，停止發送")
+        return
+
     picks = get_top_picks(n=10)
     if not picks:
         print("無監控標的")
@@ -67,6 +95,11 @@ def monitor():
     alerts = []
 
     for p in picks:
+        if len(alerts) >= MAX_ALERTS_PER_RUN:
+            break
+        if today_count + len(alerts) >= MAX_ALERTS_PER_DAY:
+            break
+
         ticker = p["ticker"]
         target = p["target"]
         stop = p["stop"]
@@ -102,7 +135,9 @@ def monitor():
         message = f"⏰ {now} 盤中提醒\n" + "─" * 20 + "\n"
         message += "\n─────\n".join(alerts)
         send_line_message(message)
-        print(f"發送 {len(alerts)} 則提醒")
+        new_count = today_count + len(alerts)
+        save_today_alert_count(new_count)
+        print(f"發送 {len(alerts)} 則，今日累計 {new_count} 則")
     else:
         print("無達標或停損標的，不發送通知")
 
