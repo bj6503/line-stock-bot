@@ -1,13 +1,6 @@
 name: Daily Stock Bot
 
 on:
-  schedule:
-    - cron: '30 0 * * 1-5'
-    - cron: '0 2 * * 1-5'
-    - cron: '30 3 * * 1-5'
-    - cron: '0 5 * * 1-5'
-    - cron: '30 6 * * 1-5'
-    - cron: '0 1 1 * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -23,7 +16,7 @@ on:
 jobs:
   morning-scan:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '30 0 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'morning')
+    if: inputs.mode == 'morning'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -40,7 +33,7 @@ jobs:
 
   monitor-scan:
     runs-on: ubuntu-latest
-    if: contains(fromJSON('["0 2 * * 1-5","30 3 * * 1-5","0 5 * * 1-5","30 6 * * 1-5"]'), github.event.schedule) || (github.event_name == 'workflow_dispatch' && inputs.mode == 'monitor')
+    if: inputs.mode == 'monitor'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -57,7 +50,7 @@ jobs:
 
   update-watchlist:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '0 1 1 * *' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'update_watchlist')
+    if: inputs.mode == 'update_watchlist'
     permissions:
       contents: write
     steps:
