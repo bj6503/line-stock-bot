@@ -7,8 +7,8 @@ from analyzer import get_top_picks
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID = os.environ["LINE_USER_ID"]
 
-MAX_ALERTS_PER_RUN = 2   # 每次監控最多發2則
-MAX_ALERTS_PER_DAY = 7   # 每天最多發7則（加上早盤1則=8則）
+MAX_ALERTS_PER_RUN = 2
+MAX_ALERTS_PER_DAY = 7
 ALERT_LOG = "/tmp/alert_count.txt"
 
 def get_today_alert_count() -> int:
@@ -85,7 +85,7 @@ def monitor():
         print(f"今日已達上限 {MAX_ALERTS_PER_DAY} 則，停止發送")
         return
 
-    picks = get_top_picks(n=10)
+    picks = get_top_picks(n=5)
     if not picks:
         print("無監控標的")
         return
