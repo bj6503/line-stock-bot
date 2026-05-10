@@ -9,7 +9,6 @@ LINE_USER_ID = os.environ["LINE_USER_ID"]
 ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"]
 
 def get_stock_names() -> dict:
-    """取得股票代號對應中文名稱"""
     names = {}
     try:
         url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
@@ -33,7 +32,7 @@ def get_stock_names() -> dict:
         print(f"上櫃名稱取得失敗: {e}")
     return names
 
-def build_ai_summary(picks: list, names: dict) -> str:
+def build_ai_summary(picks, names) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     stock_info = ""
     for i, p in enumerate(picks, 1):
@@ -45,24 +44,24 @@ def build_ai_summary(picks: list, names: dict) -> str:
 技術訊號：{', '.join(p['signals'])}
 目標價：{p['target']} 元(+5%)
 停損價：{p['stop']} 元(-3%)
-建議股數：{p['shares']} 股
+建議股數：{p['shares']} 股(零股)
 """
     prompt = (
-        "你是一位台灣股市短線分析師。以下是今日全市場掃描綜合評分前10名股票資料。\n"
+        "你是一位台灣股市短線分析師。以下是今日全市場掃描綜合評分前5名股票資料。\n"
         "請用繁體中文為每支股票寫一段30字以內的簡短操作建議，說明為何值得關注。\n"
         "結尾加上一句風險提示。不要使用markdown符號。\n\n"
         + stock_info
     )
     msg = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=1000,
+        max_tokens=800,
         messages=[{"role": "user", "content": prompt}]
     )
     return msg.content[0].text
 
-def build_message(picks: list, summary: str, names: dict) -> str:
+def build_message(picks, summary, names) -> str:
     date_str = datetime.date.today().strftime("%m/%d")
-    lines = [f"📈 {date_str} 全市場掃描前10名", "─" * 20]
+    lines = [f"📈 {date_str} 今日精選5強", "─" * 20]
     for i, p in enumerate(picks, 1):
         name = names.get(p["ticker"], p["ticker"])
         ticker_short = p["ticker"].replace(".TW", "").replace("O", "")
@@ -71,7 +70,7 @@ def build_message(picks: list, summary: str, names: dict) -> str:
             f"💵現價 {p['price']:.1f} 元\n"
             f"🎯目標 {p['target']} ｜🛑停損 {p['stop']}\n"
             f"📊{' '.join(p['signals'])}\n"
-            f"💰建議買 {p['shares']} 股"
+            f"💰建議買 {p['shares']} 股(零股)"
         )
         lines.append("─" * 20)
     lines.append("📝 AI分析：")
@@ -98,7 +97,7 @@ def send_line_message(text: str):
 
 def main():
     print("開始全市場掃描...")
-    picks = get_top_picks(n=10)
+    picks = get_top_picks(n=5)
     if not picks:
         print("今日無符合條件股票")
         send_line_message("今日全市場掃描無符合條件股票，請留意市場狀況。")
