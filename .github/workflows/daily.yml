@@ -11,6 +11,7 @@ on:
         options:
           - morning
           - monitor
+          - combo
           - update_watchlist
 
 jobs:
@@ -47,6 +48,23 @@ jobs:
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python monitor.py
+
+  combo-scan:
+    runs-on: ubuntu-latest
+    if: inputs.mode == 'combo'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安裝套件
+        run: pip install -r requirements.txt
+      - name: 推薦+監控
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python combo.py
 
   update-watchlist:
     runs-on: ubuntu-latest
