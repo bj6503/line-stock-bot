@@ -34,17 +34,14 @@ def get_stock_names() -> dict:
 
 def build_ai_summary(top_picks, momentum_picks, names) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    
     info = "【綜合評分5強】\n"
     for i, p in enumerate(top_picks, 1):
         name = names.get(p["ticker"], p["ticker"])
         info += f"{i}. {name}({p['ticker']}) 現價{p['price']:.0f} 評分{p['score']} {','.join(p['signals'])}\n"
-    
     info += "\n【強勢動能5強】\n"
     for i, p in enumerate(momentum_picks, 1):
         name = names.get(p["ticker"], p["ticker"])
         info += f"{i}. {name}({p['ticker']}) 現價{p['price']:.0f} 評分{p['score']} {','.join(p['signals'])}\n"
-    
     prompt = (
         "你是一位台灣股市短線分析師。以下是今日掃描結果。\n"
         "請用繁體中文為每支股票寫一段25字以內的操作建議，分兩組呈現。\n"
@@ -62,7 +59,6 @@ def build_ai_summary(top_picks, momentum_picks, names) -> str:
 def build_message(top_picks, momentum_picks, summary, names) -> str:
     date_str = datetime.date.today().strftime("%m/%d")
     lines = [f"📈 {date_str} 今日推薦", "═" * 20]
-    
     lines.append("🏆 綜合評分5強（穩健）")
     lines.append("─" * 20)
     for i, p in enumerate(top_picks, 1):
@@ -76,7 +72,6 @@ def build_message(top_picks, momentum_picks, summary, names) -> str:
             f"💰 建議買 {p['shares']} 股(零股)"
         )
     lines.append("═" * 20)
-    
     lines.append("🚀 強勢動能5強（追擊）")
     lines.append("─" * 20)
     for i, p in enumerate(momentum_picks, 1):
@@ -90,7 +85,6 @@ def build_message(top_picks, momentum_picks, summary, names) -> str:
             f"💰 建議買 {p['shares']} 股(零股)"
         )
     lines.append("═" * 20)
-    
     lines.append("📝 AI分析：")
     lines.append(summary)
     lines.append("\n⚠️ 以上僅供參考，請自行判斷風險。")
@@ -101,39 +95,35 @@ def send_line_message(text: str):
         "Authorization": "Bearer " + LINE_TOKEN,
         "Content-Type": "application/json"
     }
-    body = {
-        "to": LINE_USER_ID,
-        "messages": [{"type": "text", "text": text}]
-    }
-    r = requests.post(
-        "https://api.line.me/v2/bot/message/push",
-        json=body, headers=headers
-    )
-    print("LINE 推播狀態: " + str(r.status_code))
-    if r.status_code != 200:
-        print(r.text)
+    user_ids = [uid.strip() for uid in LINE_USER_ID.split(",")]
+    for uid in user_ids:
+        body = {
+            "to": uid,
+            "messages": [{"type": "text", "text": text}]
+        }
+        r = requests.post(
+            "https://api.line.me/v2/bot/message/push",
+            json=body, headers=headers
+        )
+        print(f"LINE 推播到 {uid[:8]}... 狀態: {r.status_code}")
+        if r.status_code != 200:
+            print(r.text)
 
 def main():
     print("開始綜合評分掃描...")
     top_picks = get_top_picks(n=5)
-    
     print("開始強勢動能掃描...")
     momentum_picks = get_momentum_picks(n=5)
-    
     if not top_picks and not momentum_picks:
         print("今日無符合條件股票")
         send_line_message("今日掃描無符合條件股票，請留意市場狀況。")
         return
-    
     print("取得股票中文名稱...")
     names = get_stock_names()
-    
     print("呼叫 Claude 生成分析...")
     summary = build_ai_summary(top_picks, momentum_picks, names)
-    
     print("組合訊息...")
     message = build_message(top_picks, momentum_picks, summary, names)
-    
     print("推播到 LINE...")
     send_line_message(message)
     print("完成！")
