@@ -70,18 +70,19 @@ def send_line_message(text: str):
         "Authorization": "Bearer " + LINE_TOKEN,
         "Content-Type": "application/json"
     }
-    body = {
-        "to": LINE_USER_ID,
-        "messages": [{"type": "text", "text": text}]
-    }
-    r = requests.post(
-        "https://api.line.me/v2/bot/message/push",
-        json=body, headers=headers
-    )
-    print("LINE 推播狀態: " + str(r.status_code))
+    user_ids = [uid.strip() for uid in LINE_USER_ID.split(",")]
+    for uid in user_ids:
+        body = {
+            "to": uid,
+            "messages": [{"type": "text", "text": text}]
+        }
+        r = requests.post(
+            "https://api.line.me/v2/bot/message/push",
+            json=body, headers=headers
+        )
+        print(f"LINE 推播到 {uid[:8]}... 狀態: {r.status_code}")
 
 def check_alerts(picks, names) -> list:
-    """檢查達標/停損"""
     alerts = []
     for p in picks:
         ticker = p["ticker"]
