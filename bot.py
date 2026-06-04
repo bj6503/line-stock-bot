@@ -3,6 +3,7 @@ import requests
 import anthropic
 import datetime
 from analyzer import get_top_picks, get_momentum_picks
+from news_picks import get_news_picks
 
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID = os.environ["LINE_USER_ID"]
@@ -32,34 +33,12 @@ def get_stock_names() -> dict:
         print(f"上櫃名稱取得失敗: {e}")
     return names
 
-def build_ai_summary(top_picks, momentum_picks, names) -> str:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    info = "【綜合評分5強】\n"
-    for i, p in enumerate(top_picks, 1):
-        name = names.get(p["ticker"], p["ticker"])
-        info += f"{i}. {name}({p['ticker']}) 現價{p['price']:.0f} 評分{p['score']} {','.join(p['signals'])}\n"
-    info += "\n【強勢動能5強】\n"
-    for i, p in enumerate(momentum_picks, 1):
-        name = names.get(p["ticker"], p["ticker"])
-        info += f"{i}. {name}({p['ticker']}) 現價{p['price']:.0f} 評分{p['score']} {','.join(p['signals'])}\n"
-    prompt = (
-        "你是一位台灣股市短線分析師。以下是今日掃描結果。\n"
-        "請用繁體中文為每支股票寫一段25字以內的操作建議，分兩組呈現。\n"
-        "綜合評分組偏向穩健，動能組偏向短線追擊。\n"
-        "結尾加上一句風險提示。不要使用markdown符號。\n\n"
-        + info
-    )
-    msg = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1200,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return msg.content[0].text
-
-def build_message(top_picks, momentum_picks, summary, names) -> str:
+def build_message(top_picks, momentum_picks, news_data, names) -> str:
     date_str = datetime.date.today().strftime("%m/%d")
-    lines = [f"📈 {date_str} 今日推薦", "═" * 20]
-    lines.append("🏆 綜合評分5強（穩健）")
+    lines = [f"📈 {date_str} 盤前推薦", "═" * 20]
+
+    # 技術面綜合5強
+    lines.append("🏆 技術綜合5強（穩健）")
     lines.append("─" * 20)
     for i, p in enumerate(top_picks, 1):
         name = names.get(p["ticker"], p["ticker"])
@@ -72,7 +51,9 @@ def build_message(top_picks, momentum_picks, summary, names) -> str:
             f"💰 建議買 {p['shares']} 股(零股)"
         )
     lines.append("═" * 20)
-    lines.append("🚀 強勢動能5強（追擊）")
+
+    # 技術面強勢動能5強
+    lines.append("🚀 技術動能5強（追擊）")
     lines.append("─" * 20)
     for i, p in enumerate(momentum_picks, 1):
         name = names.get(p["ticker"], p["ticker"])
@@ -81,13 +62,27 @@ def build_message(top_picks, momentum_picks, summary, names) -> str:
             f"#{i} {name} {ticker_short}\n"
             f"💵 現價 {p['price']:.1f}\n"
             f"🎯 目標 {p['target']} ｜🛑 停損 {p['stop']}\n"
-            f"📊 {' '.join(p['signals'])}\n"
-            f"💰 建議買 {p['shares']} 股(零股)"
+            f"📊 {' '.join(p['signals'])}"
         )
     lines.append("═" * 20)
-    lines.append("📝 AI分析：")
-    lines.append(summary)
-    lines.append("\n⚠️ 以上僅供參考，請自行判斷風險。")
+
+    # 新聞題材5強
+    lines.append("📰 新聞題材5強（事件驅動）")
+    lines.append("─" * 20)
+    news_picks = news_data.get("picks", [])
+    if news_picks:
+        for i, p in enumerate(news_picks, 1):
+            stars = "⭐" * p.get("stars", 0)
+            lines.append(
+                f"#{i} {p.get('name', '')} {p.get('code', '')}\n"
+                f"{stars}\n"
+                f"💡 {p.get('reason', '')}"
+            )
+    else:
+        lines.append("今日無明確題材股")
+    lines.append("═" * 20)
+
+    lines.append("⚠️ 以上僅供參考，請自行判斷風險。")
     return "\n".join(lines)
 
 def send_line_message(text: str):
@@ -110,20 +105,26 @@ def send_line_message(text: str):
             print(r.text)
 
 def main():
-    print("開始綜合評分掃描...")
+    print("開始技術綜合掃描...")
     top_picks = get_top_picks(n=5)
-    print("開始強勢動能掃描...")
+
+    print("開始技術動能掃描...")
     momentum_picks = get_momentum_picks(n=5)
-    if not top_picks and not momentum_picks:
+
+    print("開始新聞題材分析...")
+    news_data = get_news_picks("盤前")
+
+    if not top_picks and not momentum_picks and not news_data.get("picks"):
         print("今日無符合條件股票")
         send_line_message("今日掃描無符合條件股票，請留意市場狀況。")
         return
+
     print("取得股票中文名稱...")
     names = get_stock_names()
-    print("呼叫 Claude 生成分析...")
-    summary = build_ai_summary(top_picks, momentum_picks, names)
+
     print("組合訊息...")
-    message = build_message(top_picks, momentum_picks, summary, names)
+    message = build_message(top_picks, momentum_picks, news_data, names)
+
     print("推播到 LINE...")
     send_line_message(message)
     print("完成！")
