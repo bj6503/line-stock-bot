@@ -10,6 +10,9 @@ LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID = os.environ["LINE_USER_ID"]
 ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"]
 
+def tw_now():
+    return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+
 def get_stock_names() -> dict:
     names = {}
     try:
@@ -59,8 +62,8 @@ def check_alerts(picks, names) -> list:
     return alerts
 
 def build_message(top_picks, momentum_picks, news_data, names, alerts) -> str:
-    now = datetime.datetime.now().strftime("%H:%M")
-    date_str = datetime.date.today().strftime("%m/%d")
+    now = tw_now().strftime("%H:%M")
+    date_str = tw_now().strftime("%m/%d")
     lines = [f"📈 {date_str} {now} 盤中更新", "═" * 20]
 
     if alerts:
@@ -131,6 +134,11 @@ def send_line_message(text: str):
         print(f"LINE 推播到 {uid[:8]}... 狀態: {r.status_code}")
 
 def main():
+    # 週末保險：六日不執行
+    if tw_now().weekday() >= 5:
+        print("週末不執行")
+        return
+
     print("開始技術綜合掃描...")
     top_picks = get_top_picks(n=5)
 
