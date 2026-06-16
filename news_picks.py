@@ -68,20 +68,19 @@ def get_news_picks(time_range: str = "盤前") -> dict:
 
 要求：
 1. 只推薦台股上市櫃股票，給出正確股票代號
-2. 每支股票給「強勢星等」：⭐到⭐⭐⭐⭐⭐（5星最強）
+2. 每支股票給「強勢星等」：1到5（5最強）
 3. 說明推薦理由（與哪則新聞/事件相關），30字以內
 4. 只推薦你有信心的，寧缺勿濫
 
 請用以下JSON格式回覆，不要有其他文字：
 {{
   "picks": [
-    {{"code": "2330", "name": "台積電", "stars": 5, "reason": "費半大漲，台積電ADR領漲"}},
-    ...
+    {{"code": "2330", "name": "台積電", "stars": 5, "reason": "費半大漲，台積電ADR領漲"}}
   ]
 }}"""
 
     msg = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1500,
         messages=[{"role": "user", "content": prompt}]
     )
