@@ -8,11 +8,12 @@ on:
         required: true
         default: 'morning'
         type: choice
-        options:
+      options:
           - morning
           - monitor
           - combo
           - update_watchlist
+          - finmind_test
 
 jobs:
   morning-scan:
@@ -82,6 +83,22 @@ jobs:
         run: python update_watchlist.py
       - name: 儲存清單
         run: |
+
+        finmind-test:
+    runs-on: ubuntu-latest
+    if: inputs.mode == 'finmind_test'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安裝套件
+        run: pip install requests
+      - name: FinMind測試
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python finmind_test.py
+        
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git add watchlist.json
