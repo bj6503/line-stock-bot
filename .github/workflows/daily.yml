@@ -8,7 +8,7 @@ on:
         required: true
         default: 'morning'
         type: choice
-      options:
+        options:
           - morning
           - monitor
           - combo
@@ -31,6 +31,7 @@ jobs:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python bot.py
 
   monitor-scan:
@@ -48,6 +49,7 @@ jobs:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python monitor.py
 
   combo-scan:
@@ -60,11 +62,12 @@ jobs:
           python-version: '3.11'
       - name: 安裝套件
         run: pip install -r requirements.txt
-      - name: 推薦+監控
+      - name: 推薦加監控
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python combo.py
 
   update-watchlist:
@@ -83,8 +86,13 @@ jobs:
         run: python update_watchlist.py
       - name: 儲存清單
         run: |
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add watchlist.json
+          git diff --staged --quiet || git commit -m "update watchlist"
+          git push
 
-        finmind-test:
+  finmind-test:
     runs-on: ubuntu-latest
     if: inputs.mode == 'finmind_test'
     steps:
@@ -98,9 +106,3 @@ jobs:
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python finmind_test.py
-        
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git add watchlist.json
-          git diff --staged --quiet || git commit -m "update watchlist: $(date)"
-          git push
