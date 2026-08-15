@@ -6,6 +6,7 @@ from market_env import build_env, format_env
 from daily_picks import get_daily_picks, stars_str
 from risk_map import build_risk_map
 from bb_squeeze import scan_market, find_golden
+from state import save_state, build_watch_entries
 
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID = os.environ["LINE_USER_ID"]
@@ -50,26 +51,22 @@ def send_line_message(text: str):
 
 
 def squeeze_text(bb: dict) -> str:
-    """統一壓縮天數的說法"""
     sq = bb.get("squeeze_before", 0) or bb.get("squeeze_days", 0)
     return f"壓縮{sq}日後發動" if sq > 0 else "剛脫離壓縮"
 
 
 def pick_risk_targets(picks: dict, golden: list) -> list:
     targets, seen = [], set()
-
     for g in golden:
         if g["code"] not in seen:
             targets.append({"code": g["code"], "name": g["name"]})
             seen.add(g["code"])
-
     for x in picks.get("both", []):
         if len(targets) >= RISK_TARGETS:
             break
         if x["code"] not in seen:
             targets.append({"code": x["code"], "name": x["name"]})
             seen.add(x["code"])
-
     pool = picks.get("trust", []) + picks.get("foreign", [])
     pool.sort(key=lambda x: -x.get("stars", 0))
     for x in pool:
@@ -78,7 +75,6 @@ def pick_risk_targets(picks: dict, golden: list) -> list:
         if x["code"] not in seen:
             targets.append({"code": x["code"], "name": x["name"]})
             seen.add(x["code"])
-
     return targets[:RISK_TARGETS]
 
 
@@ -103,7 +99,6 @@ def format_risk_brief(risk: dict) -> list:
 
     if burst.get("is_burst"):
         lines.append(f"   ⚡ 起漲點 {burst['start_price']:.1f}（跌破視同失敗）")
-
     if res:
         r0 = res[0]
         mark = "※" if r0.get("estimated") else ""
@@ -134,16 +129,16 @@ def format_risk_brief(risk: dict) -> list:
             lines.append(f"   🔥 融資{rc:+.0f}% 慎入")
         elif rc < -10:
             lines.append(f"   ✅ 融資{rc:+.0f}% 籌碼沉澱")
-
     return lines
 
 
 def build_message(env, picks, bb, golden, risks) -> str:
     now = tw_now()
     lines = [f"📊 {now.strftime('%m/%d')} 盤前情報", ""]
-
     lines.append(format_env(env))
     lines.append("")
+
+    golden_codes = {g["code"] for g in golden}
 
     if golden:
         lines.append("💎 黃金組合（主力買+布林訊號）")
@@ -162,8 +157,6 @@ def build_message(env, picks, bb, golden, risks) -> str:
         lines.append("")
 
     if bb:
-        golden_codes = {g["code"] for g in golden}
-
         burst_rest = [r for r in bb.get("burst", []) if r["code"] not in golden_codes]
         if burst_rest:
             lines.append("🚀 今日噴出")
@@ -194,8 +187,6 @@ def build_message(env, picks, bb, golden, risks) -> str:
         d = picks["date"]
         lines.append(f"📋 {d[4:6]}/{d[6:]} 主力動向")
         lines.append("═" * 16)
-
-        golden_codes = {g["code"] for g in golden}
 
         both_rest = [x for x in picks.get("both", []) if x["code"] not in golden_codes]
         if both_rest:
@@ -260,6 +251,15 @@ def main():
         r = build_risk_map(t["code"], t["name"])
         if r:
             risks[t["code"]] = r
+
+    print("=== 儲存追蹤清單 ===")
+    entries = build_watch_entries(golden, picks, risks)
+    save_state({
+        "watch": entries,
+        "verdict": env.get("verdict", ""),
+        "verdict_icon": env.get("verdict_icon", ""),
+    })
+    print(f"  記錄 {len(entries)} 支")
 
     print("=== 組合訊息 ===")
     msg = build_message(env, picks, bb, golden, risks)
