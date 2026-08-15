@@ -15,6 +15,7 @@ on:
           - update_watchlist
           - finmind_test
           - risk_test
+          - picks_test
 
 jobs:
   morning-scan:
@@ -122,3 +123,18 @@ jobs:
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python risk_map.py
+
+  picks-test:
+    runs-on: ubuntu-latest
+    if: inputs.mode == 'picks_test'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安裝套件
+        run: pip install requests
+      - name: 動態名單測試
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python daily_picks.py
