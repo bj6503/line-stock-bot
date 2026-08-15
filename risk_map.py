@@ -5,8 +5,12 @@ import datetime
 TOKEN = os.environ.get("FINMIND_TOKEN", "")
 API_URL = "https://api.finmindtrade.com/api/v4/data"
 
-# 融資斷頭係數：融資成本 x 0.78 約為維持率130%的斷頭價
-MARGIN_CALL_RATIO = 0.78
+# 融資維持率分層（融資自備4成，券商借6成）
+# 維持率 = 現價 / (成本 x 0.6)
+# 反推價格 = 成本 x 0.6 x 維持率
+LEVEL_WARN = 0.90    # 維持率150% → 成本x0.6x1.5
+LEVEL_CALL = 0.84    # 維持率140% → 成本x0.6x1.4
+LEVEL_FORCE = 0.78   # 維持率130% → 成本x0.6x1.3
 
 
 def fm_query(dataset: str, data_id: str = "", start_date: str = "") -> list:
@@ -25,8 +29,8 @@ def fm_query(dataset: str, data_id: str = "", start_date: str = "") -> list:
         return []
 
 
-def get_margin_zones(stock_code: str, days: int = 60) -> dict:
-    """推估融資斷頭引爆區"""
+def get_margin_analysis(stock_code: str, days: int = 90) -> dict:
+    """融資結構分析：加權平均成本 + 三層警戒價"""
     start = (datetime.date.today() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
 
     margin = fm_query("TaiwanStockMarginPurchaseShortSale", stock_code, start)
@@ -34,121 +38,160 @@ def get_margin_zones(stock_code: str, days: int = 60) -> dict:
     if not margin or not price:
         return {}
 
-    # 日期對應收盤價
-    price_map = {p["date"]: float(p.get("close", 0)) for p in price if p.get("close")}
+    # 日期 -> 當日均價（用最高最低中值較貼近實際成交）
+    price_map = {}
+    for p in price:
+        if p.get("close") and p.get("max") and p.get("min"):
+            avg = (float(p["max"]) + float(p["min"]) + float(p["close"]) * 2) / 4
+            price_map[p["date"]] = avg
 
-    # 找融資增加的日子，記錄「增加張數」與「當日均價」
-    zones = []
-    prev_balance = None
+    # 收集所有融資增量批次（全部納入，不只取前幾大）
+    batches = []
+    prev = None
     for m in margin:
         date = m.get("date")
         bal = m.get("MarginPurchaseTodayBalance")
         if bal is None or date not in price_map:
             continue
         bal = float(bal)
-        if prev_balance is not None:
-            delta = bal - prev_balance
+        if prev is not None:
+            delta = bal - prev
             if delta > 0:
-                zones.append({
-                    "date": date,
-                    "add": delta,
-                    "cost": price_map[date],
-                    "call_price": round(price_map[date] * MARGIN_CALL_RATIO, 1),
-                })
-        prev_balance = bal
+                batches.append({"add": delta, "cost": price_map[date]})
+        prev = bal
 
-    if not zones:
+    if not batches:
         return {}
+
+    # 張數加權平均成本
+    total_add = sum(b["add"] for b in batches)
+    avg_cost = sum(b["cost"] * b["add"] for b in batches) / total_add if total_add else 0
 
     # 融資水位變化
     first_bal = float(margin[0].get("MarginPurchaseTodayBalance") or 0)
     last_bal = float(margin[-1].get("MarginPurchaseTodayBalance") or 0)
     bal_change = ((last_bal - first_bal) / first_bal * 100) if first_bal else 0
 
-    # 用「增加張數」加權，找出斷頭價密集區
-    total_add = sum(z["add"] for z in zones)
-    weighted_call = sum(z["call_price"] * z["add"] for z in zones) / total_add if total_add else 0
+    # 近20日融資變化（短期火藥累積）
+    recent = margin[-20:] if len(margin) >= 20 else margin
+    r_first = float(recent[0].get("MarginPurchaseTodayBalance") or 0)
+    r_last = float(recent[-1].get("MarginPurchaseTodayBalance") or 0)
+    recent_change = ((r_last - r_first) / r_first * 100) if r_first else 0
 
-    # 取增量最大的前5批，看斷頭價範圍
-    top_zones = sorted(zones, key=lambda x: x["add"], reverse=True)[:5]
-    call_prices = [z["call_price"] for z in top_zones]
+    # 融資使用率
+    limit = margin[-1].get("MarginPurchaseLimit")
+    usage = (last_bal / float(limit) * 100) if limit and float(limit) > 0 else None
 
     return {
-        "margin_balance": last_bal,
-        "balance_change_pct": bal_change,
-        "call_zone_low": min(call_prices),
-        "call_zone_high": max(call_prices),
-        "call_zone_center": round(weighted_call, 1),
-        "hot_batches": top_zones,
-        "total_added": total_add,
+        "avg_cost": round(avg_cost, 1),
+        "warn_price": round(avg_cost * LEVEL_WARN, 1),
+        "call_price": round(avg_cost * LEVEL_CALL, 1),
+        "force_price": round(avg_cost * LEVEL_FORCE, 1),
+        "balance": last_bal,
+        "balance_change": bal_change,
+        "recent_change": recent_change,
+        "usage": usage,
     }
 
 
-def get_key_levels(stock_code: str, days: int = 90) -> dict:
-    """找前波低點與大量套牢區"""
+def get_key_levels(stock_code: str, days: int = 120) -> dict:
+    """關鍵價位：前波低點、套牢區、近期高低"""
     start = (datetime.date.today() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
     price = fm_query("TaiwanStockPrice", stock_code, start)
     if not price:
         return {}
 
     lows = [float(p["min"]) for p in price if p.get("min")]
+    highs = [float(p["max"]) for p in price if p.get("max")]
     closes = [float(p["close"]) for p in price if p.get("close")]
     volumes = [float(p.get("Trading_Volume", 0)) for p in price]
 
-    if not lows or not closes:
+    if not closes:
         return {}
 
     current = closes[-1]
 
-    # 前波低點：近30日最低
-    recent_low = min(lows[-30:]) if len(lows) >= 30 else min(lows)
+    # 前波低點：近30日
+    low_30 = min(lows[-30:]) if len(lows) >= 30 else min(lows)
+    # 更前一波低點：30-60日區間
+    low_60 = min(lows[-60:-30]) if len(lows) >= 60 else None
+    high_recent = max(highs[-60:]) if len(highs) >= 60 else max(highs)
 
-    # 大量套牢區：成交量前20%的日子，其收盤價的加權平均
-    if volumes and len(volumes) > 10:
+    # 大量套牢區
+    heavy_zone = 0
+    if len(volumes) > 10:
         threshold = sorted(volumes, reverse=True)[max(1, len(volumes) // 5)]
         heavy = [(closes[i], volumes[i]) for i in range(len(closes)) if volumes[i] >= threshold]
         if heavy:
             tv = sum(v for _, v in heavy)
             heavy_zone = round(sum(c * v for c, v in heavy) / tv, 1) if tv else 0
-        else:
-            heavy_zone = 0
-    else:
-        heavy_zone = 0
 
     return {
         "current": current,
-        "recent_low": recent_low,
+        "low_30": low_30,
+        "low_60": low_60,
+        "high_recent": high_recent,
         "heavy_zone": heavy_zone,
     }
 
 
 def get_institutional_flow(stock_code: str, days: int = 10) -> dict:
-    """近期三大法人動向"""
     start = (datetime.date.today() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
     data = fm_query("TaiwanStockInstitutionalInvestorsBuySell", stock_code, start)
     if not data:
         return {}
-
     flow = {}
     for d in data:
         name = d.get("name", "")
         net = float(d.get("buy", 0)) - float(d.get("sell", 0))
         flow[name] = flow.get(name, 0) + net
-
-    foreign = flow.get("Foreign_Investor", 0)
-    trust = flow.get("Investment_Trust", 0)
-    dealer = flow.get("Dealer_self", 0) + flow.get("Dealer_Hedging", 0)
-
     return {
-        "foreign": foreign / 1000,
-        "trust": trust / 1000,
-        "dealer": dealer / 1000,
+        "foreign": flow.get("Foreign_Investor", 0) / 1000,
+        "trust": flow.get("Investment_Trust", 0) / 1000,
+        "dealer": (flow.get("Dealer_self", 0) + flow.get("Dealer_Hedging", 0)) / 1000,
     }
 
 
+def find_danger_zones(current: float, margin: dict, levels: dict) -> list:
+    """找出賣壓重疊的關鍵防線"""
+    zones = []
+    candidates = []
+
+    if margin.get("warn_price"):
+        candidates.append(("融資警戒", margin["warn_price"]))
+    if margin.get("call_price"):
+        candidates.append(("融資追繳", margin["call_price"]))
+    if margin.get("force_price"):
+        candidates.append(("融資斷頭", margin["force_price"]))
+    if levels.get("low_30"):
+        candidates.append(("前波低點", levels["low_30"]))
+    if levels.get("low_60"):
+        candidates.append(("前低支撐", levels["low_60"]))
+
+    # 只看現價以下的
+    below = [(n, p) for n, p in candidates if p < current]
+    below.sort(key=lambda x: -x[1])
+
+    # 找出彼此距離 3% 以內的，視為重疊危險區
+    for i in range(len(below)):
+        overlaps = [below[i][0]]
+        for j in range(i + 1, len(below)):
+            if abs(below[i][1] - below[j][1]) / below[i][1] < 0.03:
+                overlaps.append(below[j][0])
+        if len(overlaps) >= 2:
+            pct = (below[i][1] - current) / current * 100
+            zones.append({
+                "price": below[i][1],
+                "pct": pct,
+                "reasons": overlaps,
+            })
+            break
+
+    return zones
+
+
 def build_risk_map(stock_code: str, stock_name: str = "") -> dict:
-    """組合完整風險地圖"""
-    margin = get_margin_zones(stock_code)
+    margin = get_margin_analysis(stock_code)
     levels = get_key_levels(stock_code)
     flow = get_institutional_flow(stock_code)
 
@@ -156,95 +199,79 @@ def build_risk_map(stock_code: str, stock_name: str = "") -> dict:
         return {}
 
     current = levels["current"]
+    danger = find_danger_zones(current, margin, levels)
 
-    result = {
+    return {
         "code": stock_code,
         "name": stock_name or stock_code,
         "current": current,
-        "levels": levels,
         "margin": margin,
+        "levels": levels,
         "flow": flow,
-        "warnings": [],
+        "danger_zones": danger,
     }
 
-    # 距離前波低點
-    if levels.get("recent_low"):
-        pct = (levels["recent_low"] - current) / current * 100
-        result["low_distance_pct"] = pct
 
-    # 距離斷頭引爆區
-    if margin.get("call_zone_center"):
-        center = margin["call_zone_center"]
-        pct = (center - current) / current * 100
-        result["call_distance_pct"] = pct
-        if -15 < pct < 0:
-            result["warnings"].append(f"融資引爆區在 {pct:.1f}% 處")
-
-    # 融資水位警示
-    if margin.get("balance_change_pct"):
-        chg = margin["balance_change_pct"]
-        if chg > 15:
-            result["warnings"].append(f"融資暴增 {chg:.0f}%，籌碼浮動大")
-        elif chg < -15:
-            result["warnings"].append(f"融資減 {abs(chg):.0f}%，籌碼沉澱")
-
-    return result
+def pct_of(target: float, current: float) -> float:
+    return (target - current) / current * 100
 
 
 def format_risk_map(risk: dict) -> str:
-    """格式化成 LINE 訊息"""
     if not risk:
         return ""
 
-    lines = [f"🗺 {risk['name']} {risk['code']}"]
-    lines.append(f"現價 {risk['current']:.1f}")
-    lines.append("─" * 16)
-
+    cur = risk["current"]
     margin = risk.get("margin", {})
     levels = risk.get("levels", {})
     flow = risk.get("flow", {})
 
-    # 融資引爆區
-    if margin.get("call_zone_center"):
-        low = margin["call_zone_low"]
-        high = margin["call_zone_high"]
-        pct = risk.get("call_distance_pct", 0)
-        lines.append(f"🔴 融資引爆區 {low:.0f}~{high:.0f}")
-        lines.append(f"   距現價 {pct:.1f}%")
+    lines = [f"🗺 {risk['name']} {risk['code']}  現價 {cur:.1f}"]
+    lines.append("━" * 14)
 
-    # 前波低點
-    if levels.get("recent_low"):
-        pct = risk.get("low_distance_pct", 0)
-        lines.append(f"🟡 前波低點 {levels['recent_low']:.0f}（{pct:.1f}%）")
+    # 融資結構
+    if margin.get("avg_cost"):
+        lines.append(f"融資戶均成本 {margin['avg_cost']:.0f}")
+        lines.append(f"🟡 警戒 {margin['warn_price']:.0f}（{pct_of(margin['warn_price'], cur):+.1f}%）")
+        lines.append(f"🟠 追繳 {margin['call_price']:.0f}（{pct_of(margin['call_price'], cur):+.1f}%）")
+        lines.append(f"🔴 斷頭 {margin['force_price']:.0f}（{pct_of(margin['force_price'], cur):+.1f}%）")
+        lines.append("━" * 14)
 
-    # 套牢區
+    # 價格結構
+    if levels.get("low_30"):
+        lines.append(f"📉 前波低 {levels['low_30']:.0f}（{pct_of(levels['low_30'], cur):+.1f}%）")
     if levels.get("heavy_zone"):
-        lines.append(f"🔵 大量套牢區 {levels['heavy_zone']:.0f}")
+        lines.append(f"🔵 套牢區 {levels['heavy_zone']:.0f}")
 
-    # 融資水位
-    if margin.get("balance_change_pct") is not None:
-        chg = margin["balance_change_pct"]
-        icon = "⚠️" if chg > 15 else "✅" if chg < -10 else "➖"
-        lines.append(f"{icon} 融資水位 {chg:+.0f}%（火藥量）")
+    # 火藥量
+    if margin.get("recent_change") is not None:
+        rc = margin["recent_change"]
+        if rc > 10:
+            icon, note = "🔥", "火藥累積中"
+        elif rc < -10:
+            icon, note = "✅", "籌碼沉澱"
+        else:
+            icon, note = "➖", "持平"
+        lines.append(f"{icon} 近20日融資 {rc:+.0f}% {note}")
+    if margin.get("usage"):
+        lines.append(f"📊 融資使用率 {margin['usage']:.0f}%")
 
-    # 法人動向
+    # 法人
     if flow:
-        f = flow.get("foreign", 0)
-        t = flow.get("trust", 0)
-        lines.append(f"🏦 近10日 外資{f:+.0f}張 投信{t:+.0f}張")
+        lines.append(f"🏦 近10日 外資{flow.get('foreign', 0):+.0f} 投信{flow.get('trust', 0):+.0f} 張")
 
-    # 警示
-    if risk.get("warnings"):
-        lines.append("─" * 16)
-        for w in risk["warnings"]:
-            lines.append(f"💡 {w}")
+    # 危險重疊區（最重要）
+    if risk.get("danger_zones"):
+        lines.append("━" * 14)
+        for z in risk["danger_zones"]:
+            lines.append(f"⚠️ 關鍵防線 {z['price']:.0f}（{z['pct']:+.1f}%）")
+            lines.append(f"   {' + '.join(z['reasons'])} 重疊")
+            lines.append(f"   破了恐引發連鎖賣壓")
 
     return "\n".join(lines)
 
 
 if __name__ == "__main__":
-    for code, name in [("2330", "台積電"), ("2317", "鴻海")]:
+    for code, name in [("2330", "台積電"), ("2317", "鴻海"), ("2454", "聯發科")]:
         print("=" * 40)
-        risk = build_risk_map(code, name)
-        print(format_risk_map(risk))
+        print(format_risk_map(build_risk_map(code, name)))
         print()
