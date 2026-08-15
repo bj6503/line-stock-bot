@@ -5,13 +5,14 @@ import datetime
 TOKEN = os.environ.get("FINMIND_TOKEN", "")
 API_URL = "https://api.finmindtrade.com/api/v4/data"
 
-LEVEL_WARN = 0.90
-LEVEL_CALL = 0.84
-LEVEL_FORCE = 0.78
+# 融資維持率分層
+LEVEL_WARN = 0.90    # 維持率150%
+LEVEL_CALL = 0.84    # 維持率140%
+LEVEL_FORCE = 0.78   # 維持率130%
 
-MERGE_PCT = 0.03
-MAX_DEPTH = 25.0
-ATR_DAYS = 5          # ATR推估的天數
+MERGE_PCT = 0.03     # 3%內視為同一階
+MAX_DEPTH = 25.0     # 只看 ±25% 以內
+ATR_DAYS = 5         # ATR推估天數
 
 
 def fm_query(dataset: str, data_id: str = "", start_date: str = "") -> list:
@@ -122,10 +123,8 @@ def round_levels(current: float) -> list:
     return [base - step, base, base + step, base + step * 2]
 
 
-def build_ladder(current: float, hist: list, margin: dict, atr: float) -> dict:
-    if not hist:
-        return {}
-
+def collect_levels(current: float, hist: list, margin: dict) -> list:
+    """收集所有支撐壓力候選點"""
     highs = [h["high"] for h in hist]
     lows = [h["low"] for h in hist]
     vz = find_volume_zones(hist)
@@ -160,53 +159,108 @@ def build_ladder(current: float, hist: list, margin: dict, atr: float) -> dict:
         if r > 0:
             raw.append((f"整數{r:.0f}", r, "心理"))
 
-    def cluster(items, above: bool):
-        items = [x for x in items if (x[1] > current) == above]
-        items = [x for x in items if abs(x[1] - current) / current * 100 <= MAX_DEPTH]
-        items.sort(key=lambda x: x[1], reverse=not above)
-        merged = []
-        for name, price, kind in items:
-            placed = False
-            for m in merged:
-                if abs(m["price"] - price) / m["price"] < MERGE_PCT:
-                    m["labels"].append(name)
-                    m["kinds"].add(kind)
-                    m["price"] = (m["price"] * len(m["labels"]) + price) / (len(m["labels"]) + 1)
-                    placed = True
-                    break
-            if not placed:
-                merged.append({"price": price, "labels": [name], "kinds": {kind},
-                               "estimated": False})
+    return raw
+
+
+def cluster_levels(raw: list, current: float, above: bool) -> list:
+    """把相近的價位合併成同一階"""
+    items = [x for x in raw if (x[1] > current) == above]
+    items = [x for x in items if abs(x[1] - current) / current * 100 <= MAX_DEPTH]
+    items.sort(key=lambda x: x[1], reverse=not above)
+
+    merged = []
+    for name, price, kind in items:
+        placed = False
         for m in merged:
-            m["pct"] = (m["price"] - current) / current * 100
-            m["strength"] = len(m["kinds"])
-        return merged[:4]
+            if abs(m["price"] - price) / m["price"] < MERGE_PCT:
+                m["labels"].append(name)
+                m["kinds"].add(kind)
+                n = len(m["labels"])
+                m["price"] = (m["price"] * (n - 1) + price) / n
+                placed = True
+                break
+        if not placed:
+            merged.append({
+                "price": price,
+                "labels": [name],
+                "kinds": {kind},
+                "estimated": False,
+            })
 
-    resistance = cluster(raw, above=True)
-    support = cluster(raw, above=False)
+    for m in merged:
+        m["pct"] = (m["price"] - current) / current * 100
+        m["strength"] = len(m["kinds"])
 
-    # 上方壓力不足時，用ATR推估補位
-    est_used = False
-    if len(resistance) < 2 and atr > 0:
-        est_move = atr * (ATR_DAYS ** 0.5)
-        for mult in (1.0, 1.8):
-            price = current * (1 + est_move * mult / 100)
-            if all(abs(price - r["price"]) / price > MERGE_PCT for r in resistance):
-                resistance.append({
-                    "price": price,
-                    "labels": [f"ATR推估{ATR_DAYS}日"],
-                    "kinds": {"推估"},
-                    "pct": (price - current) / current * 100,
-                    "strength": 1,
-                    "estimated": True,
-                })
-                est_used = True
-        resistance.sort(key=lambda x: x["price"])
+    return merged[:4]
+
+
+def add_atr_estimates(resistance: list, current: float, atr: float) -> list:
+    """上方壓力不足時補推估值（真實壓力優先，推估只補在後面）"""
+    if atr <= 0:
+        return resistance
+
+    real_count = len([r for r in resistance if not r["estimated"]])
+    if real_count >= 2:
+        return resistance
+
+    # 5日合理波動 = ATR x sqrt(5)
+    est_move = atr * (ATR_DAYS ** 0.5)
+    # 完全無真實壓力補2階，有1階真實補1階
+    multipliers = [1.0, 1.5] if real_count == 0 else [1.0]
+
+    for mult in multipliers:
+        price = current * (1 + est_move * mult / 100)
+        # 不與現有階位重疊
+        if all(abs(price - r["price"]) / price > MERGE_PCT for r in resistance):
+            resistance.append({
+                "price": price,
+                "labels": [f"ATR{ATR_DAYS}日推估"],
+                "kinds": {"推估"},
+                "pct": (price - current) / current * 100,
+                "strength": 1,
+                "estimated": True,
+            })
+
+    resistance.sort(key=lambda x: x["price"])
+    return resistance[:4]
+
+
+def evaluate_rr(resistance: list, support: list, margin_pnl) -> dict:
+    """
+    盈虧比評估
+    信心判斷只看『實際用來計算的那一階』是否為推估值
+    """
+    if not resistance or not support:
+        return {"value": None}
+
+    r0 = resistance[0]
+    s0 = support[0]
+    up = r0["pct"]
+    down = abs(s0["pct"])
+    if down <= 0:
+        return {"value": None}
+
+    rr = up / down
+
+    # 信心分級
+    if r0["estimated"]:
+        confidence = "low"
+        note = "上方無真實壓力，數值僅供參考"
+    elif margin_pnl is not None and margin_pnl > 15:
+        confidence = "mid"
+        note = "融資獲利高，賣壓可能提前出現"
+    else:
+        confidence = "high"
+        note = ""
 
     return {
-        "resistance": resistance,
-        "support": support,
-        "resistance_estimated": est_used,
+        "value": rr,
+        "confidence": confidence,
+        "note": note,
+        "up_price": r0["price"],
+        "up_pct": up,
+        "down_price": s0["price"],
+        "down_pct": s0["pct"],
     }
 
 
@@ -214,31 +268,24 @@ def build_risk_map(stock_code: str, stock_name: str = "") -> dict:
     hist = get_price_history(stock_code)
     if not hist:
         return {}
+
     current = hist[-1]["close"]
 
     ranges = [(h["high"] - h["low"]) / h["close"] * 100 for h in hist[-20:] if h["close"] > 0]
     atr = sum(ranges) / len(ranges) if ranges else 0
 
     margin = get_margin_analysis(stock_code, hist)
-    ladder = build_ladder(current, hist, margin, atr)
+    raw = collect_levels(current, hist, margin)
+
+    resistance = cluster_levels(raw, current, above=True)
+    support = cluster_levels(raw, current, above=False)
+    resistance = add_atr_estimates(resistance, current, atr)
 
     margin_pnl = None
     if margin.get("avg_cost"):
         margin_pnl = (current - margin["avg_cost"]) / margin["avg_cost"] * 100
 
-    # 盈虧比
-    rr, rr_conf = None, "high"
-    res = ladder.get("resistance", [])
-    sup = ladder.get("support", [])
-    if res and sup:
-        up = res[0]["pct"]
-        down = abs(sup[0]["pct"])
-        if down > 0:
-            rr = up / down
-            if ladder.get("resistance_estimated"):
-                rr_conf = "low"
-            elif margin_pnl is not None and margin_pnl > 15:
-                rr_conf = "mid"
+    rr = evaluate_rr(resistance, support, margin_pnl)
 
     return {
         "code": stock_code,
@@ -247,9 +294,8 @@ def build_risk_map(stock_code: str, stock_name: str = "") -> dict:
         "atr": atr,
         "margin": margin,
         "margin_pnl": margin_pnl,
-        "ladder": ladder,
+        "ladder": {"resistance": resistance, "support": support},
         "rr": rr,
-        "rr_confidence": rr_conf,
     }
 
 
@@ -260,46 +306,47 @@ def strength_icon(n: int) -> str:
 def format_ladder(risk: dict) -> str:
     if not risk:
         return ""
+
     cur = risk["current"]
-    ladder = risk.get("ladder", {})
-    res = ladder.get("resistance", [])
-    sup = ladder.get("support", [])
+    res = risk.get("ladder", {}).get("resistance", [])
+    sup = risk.get("ladder", {}).get("support", [])
     lines = []
 
     if res:
         lines.append("📈 上檔壓力")
         for r in reversed(res):
             labels = "/".join(r["labels"][:2])
-            mark = "※" if r.get("estimated") else ""
+            mark = " ※推估" if r["estimated"] else ""
             lines.append(f" {strength_icon(r['strength'])} {r['price']:.1f}（{r['pct']:+.1f}%）{labels}{mark}")
         if len(res) >= 2:
-            lines.append(f"   ▲ 突破{res[0]['price']:.1f}→直攻{res[1]['price']:.1f}")
+            lines.append(f"   ▲ 突破{res[0]['price']:.1f} → 直攻{res[1]['price']:.1f}")
 
     lines.append(f"━━ 現價 {cur:.1f} ━━")
 
     if sup:
         if len(sup) >= 2:
-            lines.append(f"   ▼ 跌破{sup[0]['price']:.1f}→直落{sup[1]['price']:.1f}")
+            lines.append(f"   ▼ 跌破{sup[0]['price']:.1f} → 直落{sup[1]['price']:.1f}")
         lines.append("📉 下檔支撐")
         for s in sup:
             labels = "/".join(s["labels"][:2])
             lines.append(f" {strength_icon(s['strength'])} {s['price']:.1f}（{s['pct']:+.1f}%）{labels}")
 
-    if risk.get("rr"):
-        rr = risk["rr"]
-        conf = risk.get("rr_confidence", "high")
+    rr = risk.get("rr", {})
+    if rr.get("value") is not None:
+        v = rr["value"]
+        conf = rr["confidence"]
         if conf == "low":
-            note = "※上方無壓，推估值"
-            icon = "❓"
-        elif rr >= 1.5:
-            note, icon = "划算", "✅"
-        elif rr < 0.8:
-            note, icon = "偏差，空間不足", "⚠️"
+            icon, verdict = "❓", "參考值"
+        elif v >= 1.5:
+            icon, verdict = "✅", "划算"
+        elif v < 0.8:
+            icon, verdict = "⚠️", "偏差，空間不足"
         else:
-            note, icon = "普通", "➖"
-        lines.append(f"⚖️ 盈虧比 1:{rr:.2f} {icon} {note}")
-        if conf == "mid":
-            lines.append("   ※融資獲利高，上方賣壓可能提前出現")
+            icon, verdict = "➖", "普通"
+        lines.append(f"⚖️ 盈虧比 1:{v:.2f} {icon} {verdict}")
+        lines.append(f"   上 {rr['up_pct']:+.1f}% / 下 {rr['down_pct']:+.1f}%")
+        if rr.get("note"):
+            lines.append(f"   ※{rr['note']}")
 
     pnl = risk.get("margin_pnl")
     if pnl is not None:
@@ -311,8 +358,8 @@ def format_ladder(risk: dict) -> str:
             lines.append(f"✅ 融資套牢{pnl:+.0f}%，賣壓已釋放")
 
     m = risk.get("margin", {})
-    if m.get("recent_change") is not None:
-        rc = m["recent_change"]
+    rc = m.get("recent_change")
+    if rc is not None:
         if rc > 30:
             lines.append(f"🔥 融資{rc:+.0f}% 火藥大量累積，慎入")
         elif rc > 10:
@@ -332,6 +379,6 @@ def format_risk_map(risk: dict) -> str:
 
 if __name__ == "__main__":
     for code, name in [("2347", "聯強"), ("3017", "奇鋐"), ("2376", "技嘉"), ("6213", "聯茂")]:
-        print("=" * 42)
+        print("=" * 44)
         print(format_risk_map(build_risk_map(code, name)))
         print()
