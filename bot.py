@@ -9,7 +9,7 @@ from risk_map import build_risk_map
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID = os.environ["LINE_USER_ID"]
 
-RISK_TARGETS = 3  # 對前幾名跑風險地圖
+RISK_TARGETS = 3
 
 
 def tw_now():
@@ -31,7 +31,6 @@ def send_line_message(text: str):
 
 
 def pick_risk_targets(picks: dict) -> list:
-    """挑出要做風險地圖的標的：雙主力優先，補足外資/投信高星"""
     targets = []
     seen = set()
 
@@ -63,7 +62,6 @@ def format_stock_line(x: dict, show_trust: bool = False) -> list:
 
 
 def format_risk_brief(risk: dict) -> list:
-    """精簡版風險地圖"""
     if not risk:
         return []
     cur = risk["current"]
@@ -80,11 +78,11 @@ def format_risk_brief(risk: dict) -> list:
 
     if m.get("warn_price"):
         wp = m["warn_price"]
-        lines.append(f"   🟡 融資警戒 {wp:.1f}（{(wp-cur)/cur*100:+.1f}%）")
+        lines.append(f"   🟡 融資警戒 {wp:.1f}（{(wp - cur) / cur * 100:+.1f}%）")
 
     if lv.get("low_30"):
         lo = lv["low_30"]
-        lines.append(f"   📉 前波低 {lo:.1f}（{(lo-cur)/cur*100:+.1f}%）")
+        lines.append(f"   📉 前波低 {lo:.1f}（{(lo - cur) / cur * 100:+.1f}%）")
 
     for z in risk.get("danger_zones", [])[:1]:
         lines.append(f"   ⚠️ 關鍵防線 {z['price']:.1f}（{z['pct']:+.1f}%）")
@@ -104,7 +102,6 @@ def build_message(env: dict, picks: dict, risks: dict) -> str:
     now = tw_now()
     lines = [f"📊 {now.strftime('%m/%d')} 盤前情報", ""]
 
-    # 環境
     lines.append(format_env(env))
     lines.append("")
 
@@ -151,8 +148,9 @@ def build_message(env: dict, picks: dict, risks: dict) -> str:
 
 
 def main():
-    if tw_now().weekday() >= 5:
-        print("週末不執行")
+    force = os.environ.get("FORCE_RUN", "").lower() == "true"
+    if not force and tw_now().weekday() >= 5:
+        print("週末不執行（測試請用 morning_force 模式）")
         return
 
     print("=== 環境判讀 ===")
