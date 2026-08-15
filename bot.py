@@ -4,18 +4,33 @@ import datetime
 
 from market_env import build_env, format_env
 from daily_picks import get_daily_picks, stars_str
-from risk_map import build_risk_map, format_ladder
+from risk_map import build_risk_map
 from bb_squeeze import scan_market, find_golden
 
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID = os.environ["LINE_USER_ID"]
 
-RISK_TARGETS = 3
+RISK_TARGETS = 5
 LINE_MAX_LEN = 4800
 
 
 def tw_now():
     return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+
+
+def split_message(text: str) -> list:
+    if len(text) <= LINE_MAX_LEN:
+        return [text]
+    chunks, cur, size = [], [], 0
+    for line in text.split("\n"):
+        if size + len(line) + 1 > LINE_MAX_LEN and cur:
+            chunks.append("\n".join(cur))
+            cur, size = [], 0
+        cur.append(line)
+        size += len(line) + 1
+    if cur:
+        chunks.append("\n".join(cur))
+    return chunks
 
 
 def send_line_message(text: str):
@@ -34,24 +49,13 @@ def send_line_message(text: str):
                 print(r.text)
 
 
-def split_message(text: str) -> list:
-    if len(text) <= LINE_MAX_LEN:
-        return [text]
-    chunks, cur = [], []
-    size = 0
-    for line in text.split("\n"):
-        if size + len(line) + 1 > LINE_MAX_LEN and cur:
-            chunks.append("\n".join(cur))
-            cur, size = [], 0
-        cur.append(line)
-        size += len(line) + 1
-    if cur:
-        chunks.append("\n".join(cur))
-    return chunks
+def squeeze_text(bb: dict) -> str:
+    """統一壓縮天數的說法"""
+    sq = bb.get("squeeze_before", 0) or bb.get("squeeze_days", 0)
+    return f"壓縮{sq}日後發動" if sq > 0 else "剛脫離壓縮"
 
 
 def pick_risk_targets(picks: dict, golden: list) -> list:
-    """優先對黃金組合做風險地圖，其次雙主力"""
     targets, seen = [], set()
 
     for g in golden:
@@ -91,11 +95,14 @@ def format_stock_line(x: dict, show_trust: bool = False) -> list:
 def format_risk_brief(risk: dict) -> list:
     if not risk:
         return []
-    cur = risk["current"]
     res = risk.get("ladder", {}).get("resistance", [])
     sup = risk.get("ladder", {}).get("support", [])
     rr = risk.get("rr", {})
+    burst = risk.get("burst", {})
     lines = []
+
+    if burst.get("is_burst"):
+        lines.append(f"   ⚡ 起漲點 {burst['start_price']:.1f}（跌破視同失敗）")
 
     if res:
         r0 = res[0]
@@ -111,6 +118,8 @@ def format_risk_brief(risk: dict) -> list:
         v, conf = rr["value"], rr["confidence"]
         icon = "❓" if conf == "low" else "✅" if v >= 1.5 else "⚠️" if v < 0.8 else "➖"
         lines.append(f"   ⚖️ 盈虧比 1:{v:.2f} {icon}")
+        if conf == "low" and rr.get("note"):
+            lines.append(f"      ※{rr['note']}")
 
     pnl = risk.get("margin_pnl")
     if pnl is not None:
@@ -136,7 +145,6 @@ def build_message(env, picks, bb, golden, risks) -> str:
     lines.append(format_env(env))
     lines.append("")
 
-    # 黃金組合最優先
     if golden:
         lines.append("💎 黃金組合（主力買+布林訊號）")
         lines.append("═" * 16)
@@ -145,25 +153,25 @@ def build_message(env, picks, bb, golden, risks) -> str:
             lines.append(f"{b['icon']} {g['name']} {g['code']}  {b['close']:.1f}")
             lines.append(f"   {g['source']}買超 連{p.get('streak', 0)}日｜{b['signal']}")
             if b["rank"] <= 1:
-                sq = b["squeeze_before"] or b["squeeze_days"]
-                lines.append(f"   量增{b['vol_ratio']:.1f}倍 紅K+{b['body']:.1f}% 壓縮{sq}日")
+                lines.append(f"   量增{b['vol_ratio']:.1f}倍 紅K+{b['body']:.1f}%")
+                lines.append(f"   {squeeze_text(b)}")
             else:
                 lines.append(f"   縮口{b['squeeze_days']}日 分位{b['bw_rank']:.0f}")
             if g["code"] in risks:
                 lines.extend(format_risk_brief(risks[g["code"]]))
         lines.append("")
 
-    # 布林訊號
     if bb:
-        if bb.get("burst"):
+        golden_codes = {g["code"] for g in golden}
+
+        burst_rest = [r for r in bb.get("burst", []) if r["code"] not in golden_codes]
+        if burst_rest:
             lines.append("🚀 今日噴出")
             lines.append("─" * 16)
-            for r in bb["burst"][:5]:
+            for r in burst_rest[:5]:
                 lines.append(f"{r['icon']} {r['name']} {r['code']} {r['close']:.1f}")
                 lines.append(f"   +{r['body']:.1f}% 量增{r['vol_ratio']:.1f}倍")
-                sq = r["squeeze_before"] or r["squeeze_days"]
-                tail = f"壓縮{sq}日後發動" if sq else "剛脫離壓縮"
-                lines.append(f"   {tail}")
+                lines.append(f"   {squeeze_text(r)}")
             lines.append("")
 
         if bb.get("diverge"):
@@ -172,16 +180,16 @@ def build_message(env, picks, bb, golden, risks) -> str:
                 lines.append(f"  {r['name']} {r['code']} 量{r['vol_ratio']:.1f}倍 {r['body']:+.1f}%")
             lines.append("")
 
-        if bb.get("squeeze"):
+        squeeze_rest = [r for r in bb.get("squeeze", []) if r["code"] not in golden_codes]
+        if squeeze_rest:
             lines.append("🔵 極度縮口（蓄勢待發）")
             lines.append("─" * 16)
-            for r in bb["squeeze"][:6]:
+            for r in squeeze_rest[:6]:
                 lines.append(f"  {r['name']} {r['code']} {r['close']:.1f}")
                 lines.append(f"   縮口{r['squeeze_days']}日 分位{r['bw_rank']:.0f}"
                              f"｜上軌{r['upper']:.1f} 下軌{r['lower']:.1f}")
             lines.append("")
 
-    # 主力動向
     if picks:
         d = picks["date"]
         lines.append(f"📋 {d[4:6]}/{d[6:]} 主力動向")
@@ -189,30 +197,31 @@ def build_message(env, picks, bb, golden, risks) -> str:
 
         golden_codes = {g["code"] for g in golden}
 
-        if picks.get("both"):
+        both_rest = [x for x in picks.get("both", []) if x["code"] not in golden_codes]
+        if both_rest:
             lines.append("🔥 雙主力同買")
-            for x in picks["both"]:
-                if x["code"] in golden_codes:
-                    continue
+            for x in both_rest:
                 lines.extend(format_stock_line(x, show_trust=True))
                 if x["code"] in risks:
                     lines.extend(format_risk_brief(risks[x["code"]]))
             lines.append("─" * 16)
 
-        if picks.get("trust"):
+        trust_rest = [x for x in picks.get("trust", []) if x["code"] not in golden_codes]
+        if trust_rest:
             lines.append("🎯 投信買超")
-            for x in picks["trust"]:
-                if x["code"] in golden_codes:
-                    continue
+            for x in trust_rest:
                 lines.extend(format_stock_line(x))
+                if x["code"] in risks:
+                    lines.extend(format_risk_brief(risks[x["code"]]))
             lines.append("─" * 16)
 
-        if picks.get("foreign"):
+        foreign_rest = [x for x in picks.get("foreign", []) if x["code"] not in golden_codes]
+        if foreign_rest:
             lines.append("🏦 外資買超")
-            for x in picks["foreign"]:
-                if x["code"] in golden_codes:
-                    continue
+            for x in foreign_rest:
                 lines.extend(format_stock_line(x))
+                if x["code"] in risks:
+                    lines.extend(format_risk_brief(risks[x["code"]]))
 
         if picks.get("etf"):
             lines.append("─" * 16)
