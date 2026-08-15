@@ -1,207 +1,282 @@
-import os
 import requests
 import datetime
+import time
 
-TOKEN = os.environ.get("FINMIND_TOKEN", "")
-API_URL = "https://api.finmindtrade.com/api/v4/data"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+}
 
-ETF_PREFIX = ("00",)
+TWSE_T86 = "https://www.twse.com.tw/rwd/zh/fund/T86"
+TWSE_PRICE = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+TPEX_INST = "https://www.tpex.org.tw/www/zh-tw/insti/dailyTrade"
 
 
-def fm_query(dataset: str, data_id: str = "", start_date: str = "", end_date: str = "") -> list:
-    params = {"dataset": dataset, "token": TOKEN}
-    if data_id:
-        params["data_id"] = data_id
-    if start_date:
-        params["start_date"] = start_date
-    if end_date:
-        params["end_date"] = end_date
+def to_num(s) -> float:
+    if s is None:
+        return 0.0
+    s = str(s).replace(",", "").replace(" ", "").strip()
+    if s in ("", "-", "--"):
+        return 0.0
     try:
-        r = requests.get(API_URL, params=params, timeout=30)
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def get_twse_inst(date_str: str) -> dict:
+    """證交所三大法人買賣超（上市）date_str: YYYYMMDD"""
+    params = {"date": date_str, "selectType": "ALL", "response": "json"}
+    try:
+        r = requests.get(TWSE_T86, params=params, headers=HEADERS, timeout=20)
         j = r.json()
-        if j.get("status") != 200:
-            print(f"  API失敗 {dataset}: {j.get('msg')}")
-            return []
-        return j.get("data", [])
     except Exception as e:
-        print(f"  API錯誤 {dataset}: {e}")
-        return []
+        print(f"  TWSE 取得失敗: {e}")
+        return {}
 
+    if j.get("stat") != "OK":
+        return {}
 
-def is_etf(code: str) -> bool:
-    return code.startswith(ETF_PREFIX)
+    fields = j.get("fields", [])
+    data = j.get("data", [])
+    if not data:
+        return {}
 
+    # 找欄位索引
+    idx = {}
+    for i, f in enumerate(fields):
+        if "證券代號" in f:
+            idx["code"] = i
+        elif "證券名稱" in f:
+            idx["name"] = i
+        elif "外陸資買賣超股數(不含外資自營商)" in f or ("外" in f and "買賣超" in f and "自營" not in f):
+            idx.setdefault("foreign", i)
+        elif "投信買賣超股數" in f:
+            idx["trust"] = i
 
-def get_recent_trading_days(n: int = 6) -> list:
-    """取得最近n個交易日（用台積電有資料的日子推）"""
-    start = (datetime.date.today() - datetime.timedelta(days=n * 3)).strftime("%Y-%m-%d")
-    data = fm_query("TaiwanStockPrice", "2330", start)
-    dates = sorted({d["date"] for d in data})
-    return dates[-n:] if len(dates) >= n else dates
-
-
-def collect_flows(days: list) -> dict:
-    """收集這幾天全市場三大法人買賣超"""
-    flows = {}  # code -> {date -> {foreign, trust}}
-    for d in days:
-        data = fm_query("TaiwanStockInstitutionalInvestorsBuySell", "", d, d)
-        print(f"  {d}: {len(data)} 筆")
-        for row in data:
-            code = row.get("stock_id", "")
-            name = row.get("name", "")
-            if not code:
-                continue
-            net = (float(row.get("buy", 0)) - float(row.get("sell", 0))) / 1000
-            flows.setdefault(code, {}).setdefault(d, {"foreign": 0, "trust": 0})
-            if name == "Foreign_Investor":
-                flows[code][d]["foreign"] += net
-            elif name == "Investment_Trust":
-                flows[code][d]["trust"] += net
-    return flows
-
-
-def get_volumes(codes: list, date: str) -> dict:
-    """取得指定日期各股成交量（張）"""
-    data = fm_query("TaiwanStockPrice", "", date, date)
-    vol = {}
+    result = {}
     for row in data:
-        code = row.get("stock_id", "")
-        if code:
-            vol[code] = float(row.get("Trading_Volume", 0)) / 1000
+        try:
+            code = str(row[idx["code"]]).strip()
+            name = str(row[idx.get("name", 1)]).strip()
+            foreign = to_num(row[idx["foreign"]]) / 1000
+            trust = to_num(row[idx["trust"]]) / 1000
+            result[code] = {"name": name, "foreign": foreign, "trust": trust}
+        except Exception:
+            continue
+    return result
+
+
+def get_tpex_inst(date_str: str) -> dict:
+    """櫃買中心三大法人（上櫃）date_str: YYYYMMDD"""
+    roc = f"{int(date_str[:4]) - 1911}/{date_str[4:6]}/{date_str[6:]}"
+    params = {"date": roc, "type": "Daily", "response": "json"}
+    try:
+        r = requests.get(TPEX_INST, params=params, headers=HEADERS, timeout=20)
+        j = r.json()
+    except Exception:
+        return {}
+
+    rows = j.get("aaData") or j.get("tables", [{}])[0].get("data", [])
+    result = {}
+    for row in rows:
+        try:
+            code = str(row[0]).strip()
+            name = str(row[1]).strip()
+            foreign = to_num(row[10]) / 1000 if len(row) > 10 else 0
+            trust = to_num(row[13]) / 1000 if len(row) > 13 else 0
+            if code:
+                result[code] = {"name": name, "foreign": foreign, "trust": trust}
+        except Exception:
+            continue
+    return result
+
+
+def get_twse_volume(date_str: str) -> dict:
+    """證交所當日成交量"""
+    params = {"date": date_str, "type": "ALLBUT0999", "response": "json"}
+    try:
+        r = requests.get(TWSE_PRICE, params=params, headers=HEADERS, timeout=20)
+        j = r.json()
+    except Exception:
+        return {}
+
+    vol = {}
+    tables = j.get("tables", [])
+    for t in tables:
+        fields = t.get("fields", [])
+        if not any("證券代號" in f for f in fields):
+            continue
+        ci = next((i for i, f in enumerate(fields) if "證券代號" in f), None)
+        vi = next((i for i, f in enumerate(fields) if "成交股數" in f), None)
+        pi = next((i for i, f in enumerate(fields) if "收盤價" in f), None)
+        if ci is None or vi is None:
+            continue
+        for row in t.get("data", []):
+            try:
+                code = str(row[ci]).strip()
+                vol[code] = {
+                    "volume": to_num(row[vi]) / 1000,
+                    "close": to_num(row[pi]) if pi is not None else 0,
+                }
+            except Exception:
+                continue
     return vol
 
 
-def score_stocks(flows: dict, volumes: dict, days: list, investor: str) -> list:
-    """計算每支股票的主力買超強度"""
-    results = []
+def recent_weekdays(n: int = 8) -> list:
+    """往回抓n個工作日（YYYYMMDD）"""
+    days = []
+    d = datetime.date.today()
+    while len(days) < n:
+        if d.weekday() < 5:
+            days.append(d.strftime("%Y%m%d"))
+        d -= datetime.timedelta(days=1)
+    return list(reversed(days))
+
+
+def is_etf(code: str) -> bool:
+    return code.startswith("00")
+
+
+def get_daily_picks(lookback: int = 6) -> dict:
+    print("收集證交所三大法人資料...")
+    all_days = recent_weekdays(lookback + 3)
+    daily = {}
+
+    for d in reversed(all_days):
+        tw = get_twse_inst(d)
+        if not tw:
+            continue
+        tp = get_tpex_inst(d)
+        merged = {**tw, **tp}
+        daily[d] = merged
+        print(f"  {d}: 上市{len(tw)} 上櫃{len(tp)} 共{len(merged)}筆")
+        time.sleep(1.2)
+        if len(daily) >= lookback:
+            break
+
+    if not daily:
+        return {}
+
+    days = sorted(daily.keys())
     last_day = days[-1]
 
-    for code, by_date in flows.items():
-        last = by_date.get(last_day, {})
-        net_last = last.get(investor, 0)
-        if net_last <= 0:
-            continue
-
-        # 連續買超天數
-        streak = 0
-        for d in reversed(days):
-            if by_date.get(d, {}).get(investor, 0) > 0:
-                streak += 1
-            else:
-                break
-
-        # 期間累計
-        total = sum(by_date.get(d, {}).get(investor, 0) for d in days)
-
-        # 佔成交量比重
-        vol = volumes.get(code, 0)
-        ratio = (net_last / vol * 100) if vol > 0 else 0
-
-        # 綜合分數：連續天數 x2 + 量比重 + 累計買超權重
-        score = streak * 2 + min(ratio, 30) + min(total / 1000, 10)
-
-        results.append({
-            "code": code,
-            "net_last": net_last,
-            "total": total,
-            "streak": streak,
-            "ratio": ratio,
-            "volume": vol,
-            "score": score,
-            "is_etf": is_etf(code),
-        })
-
-    results.sort(key=lambda x: -x["score"])
-    return results
-
-
-def get_daily_picks() -> dict:
-    print("取得交易日...")
-    days = get_recent_trading_days(6)
-    if not days:
-        return {}
-    print(f"  區間: {days[0]} ~ {days[-1]}")
-
-    print("收集三大法人資料...")
-    flows = collect_flows(days)
-    print(f"  共 {len(flows)} 支股票")
-
     print("取得成交量...")
-    volumes = get_volumes(list(flows.keys()), days[-1])
+    vols = get_twse_volume(last_day)
+    time.sleep(1)
 
-    foreign_all = score_stocks(flows, volumes, days, "foreign")
-    trust_all = score_stocks(flows, volumes, days, "trust")
-
-    # 個股 vs ETF 分開
-    foreign_stocks = [x for x in foreign_all if not x["is_etf"]][:5]
-    trust_stocks = [x for x in trust_all if not x["is_etf"]][:5]
-    etf_flows = [x for x in foreign_all if x["is_etf"]][:3]
-
-    # 雙主力同買
-    f_codes = {x["code"] for x in foreign_all[:40] if not x["is_etf"]}
-    t_codes = {x["code"] for x in trust_all[:40] if not x["is_etf"]}
-    both_codes = f_codes & t_codes
-    both = []
-    for code in both_codes:
-        f = next((x for x in foreign_all if x["code"] == code), None)
-        t = next((x for x in trust_all if x["code"] == code), None)
-        if f and t:
-            both.append({
-                "code": code,
-                "foreign": f["net_last"],
-                "trust": t["net_last"],
-                "streak": max(f["streak"], t["streak"]),
-                "score": f["score"] + t["score"],
+    # 彙整每支股票
+    stats = {}
+    for d in days:
+        for code, v in daily[d].items():
+            s = stats.setdefault(code, {
+                "name": v["name"], "hist": {}, "code": code
             })
+            s["hist"][d] = v
+
+    def build(investor: str) -> list:
+        out = []
+        for code, s in stats.items():
+            last = s["hist"].get(last_day)
+            if not last:
+                continue
+            net = last[investor]
+            if net <= 0:
+                continue
+
+            streak = 0
+            for d in reversed(days):
+                h = s["hist"].get(d)
+                if h and h[investor] > 0:
+                    streak += 1
+                else:
+                    break
+
+            total = sum(s["hist"][d][investor] for d in days if d in s["hist"])
+            vinfo = vols.get(code, {})
+            volume = vinfo.get("volume", 0)
+            ratio = (net / volume * 100) if volume > 0 else 0
+
+            score = streak * 2 + min(ratio, 30) + min(total / 500, 10)
+
+            out.append({
+                "code": code, "name": s["name"],
+                "net": net, "total": total, "streak": streak,
+                "ratio": ratio, "volume": volume,
+                "close": vinfo.get("close", 0),
+                "score": score, "etf": is_etf(code),
+            })
+        out.sort(key=lambda x: -x["score"])
+        return out
+
+    f_all = build("foreign")
+    t_all = build("trust")
+
+    f_stocks = [x for x in f_all if not x["etf"]][:5]
+    t_stocks = [x for x in t_all if not x["etf"]][:5]
+    etfs = [x for x in f_all if x["etf"]][:3]
+
+    f_top = {x["code"] for x in f_all[:50] if not x["etf"]}
+    t_top = {x["code"] for x in t_all[:50] if not x["etf"]}
+    both = []
+    for code in f_top & t_top:
+        f = next(x for x in f_all if x["code"] == code)
+        t = next(x for x in t_all if x["code"] == code)
+        both.append({
+            "code": code, "name": f["name"],
+            "foreign": f["net"], "trust": t["net"],
+            "streak": max(f["streak"], t["streak"]),
+            "score": f["score"] + t["score"],
+        })
     both.sort(key=lambda x: -x["score"])
 
     return {
-        "date": days[-1],
-        "foreign": foreign_stocks,
-        "trust": trust_stocks,
-        "etf": etf_flows,
+        "date": last_day,
+        "foreign": f_stocks,
+        "trust": t_stocks,
+        "etf": etfs,
         "both": both[:3],
     }
 
 
-def format_picks(picks: dict, names: dict = None) -> str:
+def format_picks(picks: dict) -> str:
     if not picks:
         return "無法取得法人資料"
-    names = names or {}
 
-    def nm(code):
-        return names.get(code, code)
-
-    lines = [f"📋 {picks['date']} 主力動向", "═" * 16]
+    d = picks["date"]
+    date_fmt = f"{d[4:6]}/{d[6:]}"
+    lines = [f"📋 {date_fmt} 主力動向", "═" * 16]
 
     if picks.get("both"):
         lines.append("🔥 雙主力同買")
         for b in picks["both"]:
-            lines.append(f"  {nm(b['code'])} {b['code']}")
+            lines.append(f"  {b['name']} {b['code']}")
             lines.append(f"  外資{b['foreign']:+.0f} 投信{b['trust']:+.0f}張 連{b['streak']}日")
         lines.append("─" * 16)
 
     lines.append("🏦 外資買超前5")
     for i, x in enumerate(picks["foreign"], 1):
-        lines.append(f"{i}. {nm(x['code'])} {x['code']}")
-        lines.append(f"   +{x['net_last']:.0f}張 連{x['streak']}日 佔量{x['ratio']:.1f}%")
+        lines.append(f"{i}. {x['name']} {x['code']}")
+        lines.append(f"   +{x['net']:.0f}張 連{x['streak']}日 佔量{x['ratio']:.1f}%")
     lines.append("─" * 16)
 
     lines.append("🎯 投信買超前5")
     for i, x in enumerate(picks["trust"], 1):
-        lines.append(f"{i}. {nm(x['code'])} {x['code']}")
-        lines.append(f"   +{x['net_last']:.0f}張 連{x['streak']}日 佔量{x['ratio']:.1f}%")
+        lines.append(f"{i}. {x['name']} {x['code']}")
+        lines.append(f"   +{x['net']:.0f}張 連{x['streak']}日 佔量{x['ratio']:.1f}%")
 
     if picks.get("etf"):
         lines.append("─" * 16)
-        lines.append("📊 ETF資金（大盤氣氛）")
+        lines.append("📊 ETF資金")
         for x in picks["etf"]:
-            lines.append(f"  {nm(x['code'])} {x['code']} +{x['net_last']:.0f}張")
+            lines.append(f"  {x['name']} {x['code']} +{x['net']:.0f}張")
 
     return "\n".join(lines)
 
 
 if __name__ == "__main__":
-    picks = get_daily_picks()
+    p = get_daily_picks()
     print()
-    print(format_picks(picks))
+    print(format_picks(p))
