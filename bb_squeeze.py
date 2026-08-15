@@ -13,10 +13,10 @@ BB_PERIOD = 20
 BB_STD = 2.0
 SQUEEZE_PCT = 25
 
-VOLUME_MULTIPLE = 2.0      # 噴出量增門檻
-VOLUME_WARN = 1.5          # 準噴出量增門檻
-MIN_BODY_PCT = 2.0         # 噴出最低漲幅
-DIVERGE_VOL = 3.0          # 量增超過此倍數但漲幅不足 → 量價背離
+VOLUME_MULTIPLE = 2.0
+VOLUME_WARN = 1.5
+MIN_BODY_PCT = 2.0
+DIVERGE_VOL = 3.0
 
 SQUEEZE_RECENT = 5
 BREAK_LOOKBACK = 10
@@ -34,6 +34,10 @@ def is_finance(code: str) -> bool:
 
 def is_etf(code: str) -> bool:
     return code.startswith("00")
+
+
+def clean_name(name: str) -> str:
+    return str(name).replace("*", "").replace("＊", "").strip()
 
 
 def to_num(s) -> float:
@@ -72,7 +76,7 @@ def get_twse_daily(date_str: str) -> dict:
                 if close <= 0:
                     continue
                 out[code] = {
-                    "name": str(row[ni]).strip() if ni is not None else code,
+                    "name": clean_name(row[ni]) if ni is not None else code,
                     "open": to_num(row[oi]) if oi is not None else close,
                     "close": close,
                     "high": to_num(row[hi]) if hi is not None else close,
@@ -115,7 +119,6 @@ def percentile(values: list, p: float) -> float:
 
 
 def count_squeeze_before(bws: list, threshold: float, end_index: int) -> int:
-    """計算 end_index 之前（不含）的連續縮口天數"""
     days = 0
     for i in range(end_index - 1, -1, -1):
         if bws[i] <= threshold:
@@ -143,7 +146,6 @@ def analyze(code: str, hist: list) -> dict:
     threshold = percentile(bws, SQUEEZE_PCT)
     in_squeeze = cur_bw <= threshold
 
-    # 今日起算的連續縮口天數
     squeeze_days = 0
     for b in reversed(bws):
         if b <= threshold:
@@ -151,7 +153,6 @@ def analyze(code: str, hist: list) -> dict:
         else:
             break
 
-    # 噴出前的縮口天數（從最後一筆之前往回算）
     squeeze_before = count_squeeze_before(bws, threshold, len(bws) - 1)
 
     recent = bws[-(SQUEEZE_RECENT + 1):-1] if len(bws) > SQUEEZE_RECENT else bws[:-1]
@@ -170,11 +171,9 @@ def analyze(code: str, hist: list) -> dict:
     bw_rank = sum(1 for b in bws if b < cur_bw) / len(bws) * 100
     avg_vol = sum(h["volume"] for h in hist[-20:]) / min(20, len(hist))
 
-    # 量價背離：爆量但漲幅不足
     diverge = vol_ratio >= DIVERGE_VOL and body < MIN_BODY_PCT
-
-    # 訊號判定（噴出必須紅K且漲幅達標）
     strong = red_k and body >= MIN_BODY_PCT
+
     if was_squeezed and strong and vol_ratio >= VOLUME_MULTIPLE and break_up:
         signal, icon, rank = "縮口噴出", "🚀", 0
     elif was_squeezed and strong and vol_ratio >= VOLUME_WARN and break_up:
@@ -303,26 +302,44 @@ def format_report(data: dict) -> str:
 
 
 def find_golden(bb_data: dict, picks: dict) -> list:
+    """
+    黃金組合：主力買超 × 布林訊號
+    使用擴充池(前25名)比對，提高交集機率
+    """
     if not bb_data or not picks:
         return []
+
     bb_map = {r["code"]: r for r in bb_data.get("all", [])}
     golden, seen = [], set()
-    groups = [("雙主力", picks.get("both", [])),
-              ("投信", picks.get("trust", [])),
-              ("外資", picks.get("foreign", []))]
+
+    # 優先序：雙主力 > 投信池 > 外資池
+    groups = [
+        ("雙主力", picks.get("both", [])),
+        ("投信", picks.get("trust_pool") or picks.get("trust", [])),
+        ("外資", picks.get("foreign_pool") or picks.get("foreign", [])),
+    ]
+
     for label, items in groups:
         for x in items:
             code = x["code"]
             if code in seen or code not in bb_map:
                 continue
             r = bb_map[code]
-            if r["rank"] == 2 or r["rank"] > 3:
+            # 排除量價背離(rank2)與弱訊號(rank4)
+            if r["rank"] in (2, 4):
                 continue
             seen.add(code)
-            golden.append({"code": code, "name": x["name"],
-                           "source": label, "bb": r, "picks": x})
-    order = {"雙主力": 0, "投信": 1, "外資": 2}
-    golden.sort(key=lambda g: (g["bb"]["rank"], order.get(g["source"], 9)))
+            golden.append({
+                "code": code,
+                "name": x["name"],
+                "source": label,
+                "bb": r,
+                "picks": x,
+            })
+
+    src_order = {"雙主力": 0, "投信": 1, "外資": 2}
+    golden.sort(key=lambda g: (g["bb"]["rank"], src_order.get(g["source"], 9),
+                               -g["picks"].get("streak", 0)))
     return golden
 
 
@@ -335,7 +352,7 @@ def format_golden(golden: list) -> str:
         lines.append(f"{bb['icon']} {g['name']} {g['code']}  {bb['close']:.1f}")
         lines.append(f"   {g['source']}買超 連{p.get('streak', 0)}日｜{bb['signal']}")
         if bb["rank"] <= 1:
-            sq = bb["squeeze_before"] if bb["squeeze_before"] > 0 else bb["squeeze_days"]
+            sq = bb["squeeze_before"] or bb["squeeze_days"]
             lines.append(f"   量增{bb['vol_ratio']:.1f}倍 紅K+{bb['body']:.1f}% 壓縮{sq}日")
         else:
             lines.append(f"   縮口{bb['squeeze_days']}日 分位{bb['bw_rank']:.0f}")
