@@ -1,51 +1,92 @@
-import os
 import requests
 import datetime
+import time
 
-TOKEN = os.environ.get("FINMIND_TOKEN", "")
-API_URL = "https://api.finmindtrade.com/api/v4/data"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+}
+TWSE_INDEX = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
 
-BB_PERIOD = 20              # 布林週期
-BB_STD = 2.0                # 標準差倍數
-LOOKBACK_BW = 120           # 帶寬百分位的回看天數
-SQUEEZE_PCT = 25            # 帶寬落在後25%視為縮口
-VOLUME_MULTIPLE = 2.0       # 噴出要量增2倍
-VOLUME_WARN = 1.5           # 準噴出門檻
-SQUEEZE_RECENT = 5          # 近5日內曾縮口才算有效噴出
-BREAK_LOOKBACK = 10         # 突破近10日高
+BB_PERIOD = 20
+BB_STD = 2.0
+SQUEEZE_PCT = 25
+VOLUME_MULTIPLE = 2.0
+VOLUME_WARN = 1.5
+SQUEEZE_RECENT = 5
+BREAK_LOOKBACK = 10
+
+HISTORY_DAYS = 70          # 抓幾個交易日
+MIN_PRICE = 30.0
+MIN_AVG_VOLUME = 1000
+
+FINANCE_EXTRA = {"5880"}
 
 
-def fm_query(dataset: str, data_id: str = "", start_date: str = "") -> list:
-    params = {"dataset": dataset, "token": TOKEN}
-    if data_id:
-        params["data_id"] = data_id
-    if start_date:
-        params["start_date"] = start_date
+def is_finance(code: str) -> bool:
+    return code in FINANCE_EXTRA or (len(code) == 4 and code.startswith("28"))
+
+
+def is_etf(code: str) -> bool:
+    return code.startswith("00")
+
+
+def to_num(s) -> float:
+    if s is None:
+        return 0.0
+    s = str(s).replace(",", "").replace(" ", "").strip()
+    if s in ("", "-", "--", "---", "X"):
+        return 0.0
     try:
-        j = requests.get(API_URL, params=params, timeout=15).json()
-        if j.get("status") != 200:
-            return []
-        return j.get("data", [])
+        return float(s)
     except Exception:
-        return []
+        return 0.0
 
 
-def get_history(stock_code: str, days: int = 300) -> list:
-    start = (datetime.date.today() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
-    out = []
-    for p in fm_query("TaiwanStockPrice", stock_code, start):
-        try:
-            out.append({
-                "date": p["date"],
-                "open": float(p["open"]),
-                "close": float(p["close"]),
-                "high": float(p["max"]),
-                "low": float(p["min"]),
-                "volume": float(p.get("Trading_Volume", 0)) / 1000,
-            })
-        except Exception:
+def get_twse_daily(date_str: str) -> dict:
+    params = {"date": date_str, "type": "ALLBUT0999", "response": "json"}
+    try:
+        j = requests.get(TWSE_INDEX, params=params, headers=HEADERS, timeout=25).json()
+    except Exception:
+        return {}
+    out = {}
+    for t in j.get("tables", []):
+        fields = t.get("fields", [])
+        if not any("證券代號" in f for f in fields):
             continue
+        gi = lambda kw: next((i for i, f in enumerate(fields) if kw in f), None)
+        ci, ni = gi("證券代號"), gi("證券名稱")
+        vi, oi = gi("成交股數"), gi("開盤價")
+        pi, hi, li = gi("收盤價"), gi("最高價"), gi("最低價")
+        if ci is None or pi is None:
+            continue
+        for row in t.get("data", []):
+            try:
+                code = str(row[ci]).strip()
+                close = to_num(row[pi])
+                if close <= 0:
+                    continue
+                out[code] = {
+                    "name": str(row[ni]).strip() if ni is not None else code,
+                    "open": to_num(row[oi]) if oi is not None else close,
+                    "close": close,
+                    "high": to_num(row[hi]) if hi is not None else close,
+                    "low": to_num(row[li]) if li is not None else close,
+                    "volume": to_num(row[vi]) / 1000 if vi is not None else 0,
+                }
+            except Exception:
+                continue
     return out
+
+
+def recent_weekdays(n: int) -> list:
+    days, d = [], datetime.date.today()
+    while len(days) < n:
+        if d.weekday() < 5:
+            days.append(d.strftime("%Y%m%d"))
+        d -= datetime.timedelta(days=1)
+    return list(reversed(days))
 
 
 def calc_bb(closes: list) -> dict:
@@ -53,23 +94,10 @@ def calc_bb(closes: list) -> dict:
         return {}
     w = closes[-BB_PERIOD:]
     mid = sum(w) / BB_PERIOD
-    var = sum((c - mid) ** 2 for c in w) / BB_PERIOD
-    std = var ** 0.5
-    upper = mid + BB_STD * std
-    lower = mid - BB_STD * std
-    bw = (upper - lower) / mid * 100 if mid > 0 else 0
-    return {"upper": upper, "mid": mid, "lower": lower, "bw": bw}
-
-
-def bb_series(hist: list) -> list:
-    """回傳每日帶寬序列，對齊 hist[BB_PERIOD-1:]"""
-    closes = [h["close"] for h in hist]
-    out = []
-    for i in range(BB_PERIOD, len(closes) + 1):
-        bb = calc_bb(closes[:i])
-        if bb:
-            out.append(bb)
-    return out
+    std = (sum((c - mid) ** 2 for c in w) / BB_PERIOD) ** 0.5
+    upper, lower = mid + BB_STD * std, mid - BB_STD * std
+    return {"upper": upper, "mid": mid, "lower": lower,
+            "bw": (upper - lower) / mid * 100 if mid > 0 else 0}
 
 
 def percentile(values: list, p: float) -> float:
@@ -82,24 +110,24 @@ def percentile(values: list, p: float) -> float:
     return s[f] + (s[c] - s[f]) * (k - f)
 
 
-def analyze_squeeze(stock_code: str, stock_name: str = "") -> dict:
-    hist = get_history(stock_code)
-    if len(hist) < BB_PERIOD + 40:
+def analyze(code: str, hist: list) -> dict:
+    if len(hist) < BB_PERIOD + 15:
         return {}
 
-    bbs = bb_series(hist)
-    if len(bbs) < 30:
+    closes = [h["close"] for h in hist]
+    bws = []
+    for i in range(BB_PERIOD, len(closes) + 1):
+        bb = calc_bb(closes[:i])
+        if bb:
+            bws.append(bb["bw"])
+    if len(bws) < 15:
         return {}
 
-    bws = [b["bw"] for b in bbs]
-    window = bws[-LOOKBACK_BW:] if len(bws) >= LOOKBACK_BW else bws
-    threshold = percentile(window, SQUEEZE_PCT)
-
-    cur_bb = bbs[-1]
+    cur_bb = calc_bb(closes)
     cur_bw = cur_bb["bw"]
+    threshold = percentile(bws, SQUEEZE_PCT)
     in_squeeze = cur_bw <= threshold
 
-    # 連續縮口天數
     squeeze_days = 0
     for b in reversed(bws):
         if b <= threshold:
@@ -107,120 +135,183 @@ def analyze_squeeze(stock_code: str, stock_name: str = "") -> dict:
         else:
             break
 
-    # 近期是否曾縮口
     recent = bws[-(SQUEEZE_RECENT + 1):-1] if len(bws) > SQUEEZE_RECENT else bws[:-1]
-    was_squeezed = any(b <= threshold for b in recent) or in_squeeze
+    was_squeezed = in_squeeze or any(b <= threshold for b in recent)
 
-    today = hist[-1]
-    prev = hist[-2]
-
+    today, prev = hist[-1], hist[-2]
     red_k = today["close"] > today["open"]
-    body_pct = (today["close"] - today["open"]) / today["open"] * 100 if today["open"] > 0 else 0
+    body = (today["close"] - today["open"]) / today["open"] * 100 if today["open"] > 0 else 0
     vol_ratio = (today["volume"] / prev["volume"]) if prev["volume"] > 0 else 0
 
-    prior_highs = [h["high"] for h in hist[-(BREAK_LOOKBACK + 1):-1]]
-    break_high = today["close"] > max(prior_highs) if prior_highs else False
+    prior = [h["high"] for h in hist[-(BREAK_LOOKBACK + 1):-1]]
+    break_high = today["close"] > max(prior) if prior else False
     break_upper = today["close"] > cur_bb["upper"]
     break_up = break_high or break_upper
 
-    # 帶寬相對位置（0=史上最窄）
-    bw_rank = sum(1 for b in window if b < cur_bw) / len(window) * 100 if window else 0
+    bw_rank = sum(1 for b in bws if b < cur_bw) / len(bws) * 100
+    avg_vol = sum(h["volume"] for h in hist[-20:]) / min(20, len(hist))
 
-    # 訊號判定
     if was_squeezed and red_k and vol_ratio >= VOLUME_MULTIPLE and break_up:
-        signal, icon = "縮口噴出", "🚀"
+        signal, icon, rank = "縮口噴出", "🚀", 0
     elif was_squeezed and red_k and vol_ratio >= VOLUME_WARN and break_up:
-        signal, icon = "準噴出", "⚡"
-    elif in_squeeze and squeeze_days >= 5:
-        signal, icon = "極度縮口", "🔵"
-    elif in_squeeze:
-        signal, icon = "縮口中", "🔹"
+        signal, icon, rank = "準噴出", "⚡", 1
+    elif in_squeeze and squeeze_days >= 8:
+        signal, icon, rank = "極度縮口", "🔵", 2
+    elif in_squeeze and squeeze_days >= 4:
+        signal, icon, rank = "縮口中", "🔹", 3
     else:
-        signal, icon = "", ""
+        return {}
 
     return {
-        "code": stock_code,
-        "name": stock_name or stock_code,
-        "close": today["close"],
-        "bw": cur_bw,
-        "bw_rank": bw_rank,
-        "threshold": threshold,
-        "in_squeeze": in_squeeze,
-        "squeeze_days": squeeze_days,
-        "red_k": red_k,
-        "body_pct": body_pct,
-        "vol_ratio": vol_ratio,
-        "volume": today["volume"],
-        "break_high": break_high,
-        "break_upper": break_upper,
-        "upper": cur_bb["upper"],
-        "mid": cur_bb["mid"],
-        "lower": cur_bb["lower"],
-        "signal": signal,
-        "icon": icon,
-        "is_alert": signal in ("縮口噴出", "準噴出", "極度縮口"),
+        "code": code, "close": today["close"], "bw": cur_bw,
+        "bw_rank": bw_rank, "squeeze_days": squeeze_days,
+        "body": body, "vol_ratio": vol_ratio, "avg_volume": avg_vol,
+        "break_high": break_high, "break_upper": break_upper,
+        "upper": cur_bb["upper"], "mid": cur_bb["mid"], "lower": cur_bb["lower"],
+        "signal": signal, "icon": icon, "rank": rank,
     }
 
 
-def format_squeeze(s: dict) -> str:
-    if not s or not s.get("signal"):
-        return ""
+def scan_market(max_days: int = HISTORY_DAYS) -> dict:
+    print(f"收集{max_days}日全市場行情...")
+    hist_map, names, got = {}, {}, 0
+    for d in reversed(recent_weekdays(max_days + 15)):
+        m = get_twse_daily(d)
+        if not m:
+            continue
+        for code, v in m.items():
+            hist_map.setdefault(code, []).append(v)
+            names[code] = v["name"]
+        got += 1
+        if got % 10 == 0:
+            print(f"  已取得 {got} 日")
+        time.sleep(0.9)
+        if got >= max_days:
+            break
+    print(f"  完成，共 {got} 日 / {len(hist_map)} 支")
 
-    lines = [f"{s['icon']} {s['name']} {s['code']}  {s['signal']}"]
+    print("分析布林通道...")
+    results = []
+    for code, hist in hist_map.items():
+        if is_finance(code) or is_etf(code) or len(code) != 4:
+            continue
+        hist.reverse()
+        if len(hist) < BB_PERIOD + 15:
+            continue
+        if hist[-1]["close"] < MIN_PRICE:
+            continue
+        avg_vol = sum(h["volume"] for h in hist[-20:]) / min(20, len(hist))
+        if avg_vol < MIN_AVG_VOLUME:
+            continue
+        r = analyze(code, hist)
+        if r:
+            r["name"] = names.get(code, code)
+            results.append(r)
 
-    if s["signal"] in ("縮口噴出", "準噴出"):
-        lines.append(f"   紅K +{s['body_pct']:.1f}% 量增{s['vol_ratio']:.1f}倍")
-        parts = []
-        if s["break_upper"]:
-            parts.append("突破上軌")
-        if s["break_high"]:
-            parts.append(f"破{BREAK_LOOKBACK}日高")
-        if parts:
-            lines.append(f"   {' + '.join(parts)}")
-        lines.append(f"   縮口{s['squeeze_days']}日後發動")
-        lines.append(f"   上軌{s['upper']:.1f} 中軌{s['mid']:.1f}")
-    else:
-        lines.append(f"   帶寬{s['bw']:.1f}%（近120日{s['bw_rank']:.0f}分位）")
-        lines.append(f"   已縮口{s['squeeze_days']}日，待變盤")
-        lines.append(f"   上軌{s['upper']:.1f} 下軌{s['lower']:.1f}")
+    results.sort(key=lambda x: (x["rank"], x["bw_rank"], -x["vol_ratio"]))
+
+    return {
+        "burst": [r for r in results if r["rank"] <= 1][:8],
+        "squeeze": [r for r in results if r["rank"] == 2][:8],
+        "watching": [r for r in results if r["rank"] == 3][:5],
+        "all": results,
+    }
+
+
+def format_burst(r: dict) -> str:
+    lines = [f"{r['icon']} {r['name']} {r['code']}  {r['close']:.1f}"]
+    lines.append(f"   紅K+{r['body']:.1f}% 量增{r['vol_ratio']:.1f}倍")
+    parts = []
+    if r["break_upper"]:
+        parts.append("破上軌")
+    if r["break_high"]:
+        parts.append(f"破{BREAK_LOOKBACK}日高")
+    lines.append(f"   {' + '.join(parts)}｜縮口{r['squeeze_days']}日後發動")
+    return "\n".join(lines)
+
+
+def format_squeeze(r: dict) -> str:
+    lines = [f"{r['icon']} {r['name']} {r['code']}  {r['close']:.1f}"]
+    lines.append(f"   縮口{r['squeeze_days']}日 帶寬{r['bw']:.1f}%（分位{r['bw_rank']:.0f}）")
+    lines.append(f"   上軌{r['upper']:.1f} 下軌{r['lower']:.1f}")
+    return "\n".join(lines)
+
+
+def format_report(data: dict) -> str:
+    if not data:
+        return "掃描失敗"
+    lines = ["🎯 布林通道掃描", "═" * 16]
+
+    if data["burst"]:
+        lines.append("🚀 今日噴出")
+        for r in data["burst"]:
+            lines.append(format_burst(r))
+        lines.append("─" * 16)
+
+    if data["squeeze"]:
+        lines.append("🔵 極度縮口（蓄勢待發）")
+        for r in data["squeeze"]:
+            lines.append(format_squeeze(r))
+        lines.append("─" * 16)
+
+    if data["watching"]:
+        lines.append("🔹 縮口觀察")
+        for r in data["watching"]:
+            lines.append(f"  {r['name']} {r['code']} 縮口{r['squeeze_days']}日 分位{r['bw_rank']:.0f}")
+
+    if not (data["burst"] or data["squeeze"] or data["watching"]):
+        lines.append("目前無縮口或噴出訊號")
 
     return "\n".join(lines)
 
 
-def scan_list(items: list) -> list:
-    """items: [(code, name), ...]"""
-    results = []
-    for code, name in items:
-        s = analyze_squeeze(code, name)
-        if s and s.get("signal"):
-            results.append(s)
-    order = {"縮口噴出": 0, "準噴出": 1, "極度縮口": 2, "縮口中": 3}
-    results.sort(key=lambda x: (order.get(x["signal"], 9), -x["vol_ratio"]))
-    return results
+def find_golden(bb_data: dict, picks: dict) -> list:
+    """黃金組合：主力買 + 布林縮口"""
+    if not bb_data or not picks:
+        return []
+    bb_map = {r["code"]: r for r in bb_data.get("all", [])}
+    golden = []
+    seen = set()
+    groups = [("雙主力", picks.get("both", [])),
+              ("外資", picks.get("foreign", [])),
+              ("投信", picks.get("trust", []))]
+    for label, items in groups:
+        for x in items:
+            code = x["code"]
+            if code in seen or code not in bb_map:
+                continue
+            r = bb_map[code]
+            if r["rank"] > 2:
+                continue
+            seen.add(code)
+            golden.append({
+                "code": code, "name": x["name"], "source": label,
+                "bb": r, "picks": x,
+            })
+    order = {"雙主力": 0, "投信": 1, "外資": 2}
+    golden.sort(key=lambda g: (g["bb"]["rank"], order.get(g["source"], 9)))
+    return golden
+
+
+def format_golden(golden: list) -> str:
+    if not golden:
+        return ""
+    lines = ["💎 黃金組合（主力買+布林訊號）", "─" * 16]
+    for g in golden:
+        bb, p = g["bb"], g["picks"]
+        lines.append(f"{bb['icon']} {g['name']} {g['code']}  {bb['close']:.1f}")
+        lines.append(f"   {g['source']}買超 連{p.get('streak', 0)}日｜{bb['signal']}")
+        if bb["rank"] <= 1:
+            lines.append(f"   量增{bb['vol_ratio']:.1f}倍 紅K+{bb['body']:.1f}%")
+        else:
+            lines.append(f"   縮口{bb['squeeze_days']}日 分位{bb['bw_rank']:.0f}")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
-    targets = [
-        ("2347", "聯強"), ("3017", "奇鋐"), ("2376", "技嘉"),
-        ("6213", "聯茂"), ("8996", "高力"), ("2368", "金像電"),
-        ("8046", "南電"), ("3037", "欣興"), ("6770", "力積電"),
-        ("2330", "台積電"), ("2317", "鴻海"), ("2454", "聯發科"),
-    ]
-    print("=" * 44)
-    print("布林縮口掃描")
-    print("=" * 44)
-    found = scan_list(targets)
-    if not found:
-        print("目前無縮口或噴出訊號")
-    for s in found:
-        print(format_squeeze(s))
-        print()
-
-    print("─" * 44)
-    print("全部標的帶寬明細：")
-    for code, name in targets:
-        s = analyze_squeeze(code, name)
-        if s:
-            mark = "◀縮口" if s["in_squeeze"] else ""
-            print(f"  {name}{code}: 帶寬{s['bw']:.1f}% 分位{s['bw_rank']:.0f} "
-                  f"量比{s['vol_ratio']:.1f} {mark}")
+    data = scan_market()
+    print()
+    print(format_report(data))
+    print()
+    print("─" * 40)
+    print(f"總計找到 {len(data['all'])} 支有訊號")
