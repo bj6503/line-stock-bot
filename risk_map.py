@@ -9,8 +9,9 @@ LEVEL_WARN = 0.90
 LEVEL_CALL = 0.84
 LEVEL_FORCE = 0.78
 
-MERGE_PCT = 0.03      # 3%內視為同一階
-MAX_DEPTH = 25.0      # 最多顯示到 ±25%
+MERGE_PCT = 0.03
+MAX_DEPTH = 25.0
+ATR_DAYS = 5          # ATR推估的天數
 
 
 def fm_query(dataset: str, data_id: str = "", start_date: str = "") -> list:
@@ -30,9 +31,8 @@ def fm_query(dataset: str, data_id: str = "", start_date: str = "") -> list:
 
 def get_price_history(stock_code: str, days: int = 180) -> list:
     start = (datetime.date.today() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
-    data = fm_query("TaiwanStockPrice", stock_code, start)
     out = []
-    for p in data:
+    for p in fm_query("TaiwanStockPrice", stock_code, start):
         try:
             out.append({
                 "date": p["date"],
@@ -52,9 +52,7 @@ def get_margin_analysis(stock_code: str, hist: list, days: int = 90) -> dict:
     if not margin or not hist:
         return {}
 
-    price_map = {}
-    for h in hist:
-        price_map[h["date"]] = (h["high"] + h["low"] + h["close"] * 2) / 4
+    price_map = {h["date"]: (h["high"] + h["low"] + h["close"] * 2) / 4 for h in hist}
 
     batches, prev = [], None
     for m in margin:
@@ -93,7 +91,6 @@ def calc_ma(hist: list, n: int) -> float:
 
 
 def find_volume_zones(hist: list) -> dict:
-    """成交量密集區的上下緣"""
     if len(hist) < 20:
         return {}
     vols = [h["volume"] for h in hist]
@@ -106,12 +103,11 @@ def find_volume_zones(hist: list) -> dict:
     return {
         "low": prices[int(n * 0.25)],
         "mid": prices[int(n * 0.5)],
-        "high": prices[int(n * 0.75)],
+        "high": prices[min(int(n * 0.75), n - 1)],
     }
 
 
 def round_levels(current: float) -> list:
-    """整數關卡"""
     if current >= 1000:
         step = 100
     elif current >= 500:
@@ -126,24 +122,20 @@ def round_levels(current: float) -> list:
     return [base - step, base, base + step, base + step * 2]
 
 
-def build_ladder(current: float, hist: list, margin: dict) -> dict:
-    """建立支撐壓力階梯"""
+def build_ladder(current: float, hist: list, margin: dict, atr: float) -> dict:
     if not hist:
         return {}
 
     highs = [h["high"] for h in hist]
     lows = [h["low"] for h in hist]
     vz = find_volume_zones(hist)
-
     raw = []
 
-    # 均線
     for n, label in [(20, "月線"), (60, "季線"), (120, "半年線")]:
         ma = calc_ma(hist, n)
         if ma > 0:
             raw.append((label, ma, "均線"))
 
-    # 前波高低
     if len(hist) >= 20:
         raw.append(("20日高", max(highs[-20:]), "價格"))
         raw.append(("20日低", min(lows[-20:]), "價格"))
@@ -154,24 +146,20 @@ def build_ladder(current: float, hist: list, margin: dict) -> dict:
         raw.append(("半年高", max(highs[-120:]), "價格"))
         raw.append(("半年低", min(lows[-120:]), "價格"))
 
-    # 套牢區
     if vz:
         raw.append(("套牢上緣", vz["high"], "籌碼"))
         raw.append(("套牢核心", vz["mid"], "籌碼"))
         raw.append(("套牢下緣", vz["low"], "籌碼"))
 
-    # 融資三層
     if margin.get("warn_price"):
         raw.append(("融資警戒", margin["warn_price"], "融資"))
         raw.append(("融資追繳", margin["call_price"], "融資"))
         raw.append(("融資斷頭", margin["force_price"], "融資"))
 
-    # 整數關卡
     for r in round_levels(current):
         if r > 0:
             raw.append((f"整數{r:.0f}", r, "心理"))
 
-    # 分上下並合併相近
     def cluster(items, above: bool):
         items = [x for x in items if (x[1] > current) == above]
         items = [x for x in items if abs(x[1] - current) / current * 100 <= MAX_DEPTH]
@@ -187,15 +175,38 @@ def build_ladder(current: float, hist: list, margin: dict) -> dict:
                     placed = True
                     break
             if not placed:
-                merged.append({"price": price, "labels": [name], "kinds": {kind}})
+                merged.append({"price": price, "labels": [name], "kinds": {kind},
+                               "estimated": False})
         for m in merged:
             m["pct"] = (m["price"] - current) / current * 100
             m["strength"] = len(m["kinds"])
         return merged[:4]
 
+    resistance = cluster(raw, above=True)
+    support = cluster(raw, above=False)
+
+    # 上方壓力不足時，用ATR推估補位
+    est_used = False
+    if len(resistance) < 2 and atr > 0:
+        est_move = atr * (ATR_DAYS ** 0.5)
+        for mult in (1.0, 1.8):
+            price = current * (1 + est_move * mult / 100)
+            if all(abs(price - r["price"]) / price > MERGE_PCT for r in resistance):
+                resistance.append({
+                    "price": price,
+                    "labels": [f"ATR推估{ATR_DAYS}日"],
+                    "kinds": {"推估"},
+                    "pct": (price - current) / current * 100,
+                    "strength": 1,
+                    "estimated": True,
+                })
+                est_used = True
+        resistance.sort(key=lambda x: x["price"])
+
     return {
-        "resistance": cluster(raw, above=True),
-        "support": cluster(raw, above=False),
+        "resistance": resistance,
+        "support": support,
+        "resistance_estimated": est_used,
     }
 
 
@@ -204,25 +215,30 @@ def build_risk_map(stock_code: str, stock_name: str = "") -> dict:
     if not hist:
         return {}
     current = hist[-1]["close"]
-    margin = get_margin_analysis(stock_code, hist)
-    ladder = build_ladder(current, hist, margin)
 
-    # ATR
     ranges = [(h["high"] - h["low"]) / h["close"] * 100 for h in hist[-20:] if h["close"] > 0]
     atr = sum(ranges) / len(ranges) if ranges else 0
 
-    # 盈虧比：最近一階壓力 vs 最近一階支撐
-    rr = None
+    margin = get_margin_analysis(stock_code, hist)
+    ladder = build_ladder(current, hist, margin, atr)
+
+    margin_pnl = None
+    if margin.get("avg_cost"):
+        margin_pnl = (current - margin["avg_cost"]) / margin["avg_cost"] * 100
+
+    # 盈虧比
+    rr, rr_conf = None, "high"
     res = ladder.get("resistance", [])
     sup = ladder.get("support", [])
     if res and sup:
         up = res[0]["pct"]
         down = abs(sup[0]["pct"])
-        rr = up / down if down > 0 else None
-
-    margin_pnl = None
-    if margin.get("avg_cost"):
-        margin_pnl = (current - margin["avg_cost"]) / margin["avg_cost"] * 100
+        if down > 0:
+            rr = up / down
+            if ladder.get("resistance_estimated"):
+                rr_conf = "low"
+            elif margin_pnl is not None and margin_pnl > 15:
+                rr_conf = "mid"
 
     return {
         "code": stock_code,
@@ -233,11 +249,12 @@ def build_risk_map(stock_code: str, stock_name: str = "") -> dict:
         "margin_pnl": margin_pnl,
         "ladder": ladder,
         "rr": rr,
+        "rr_confidence": rr_conf,
     }
 
 
 def strength_icon(n: int) -> str:
-    return "▓" * n + "░" * (3 - n)
+    return "▓" * min(n, 3) + "░" * max(0, 3 - n)
 
 
 def format_ladder(risk: dict) -> str:
@@ -253,13 +270,16 @@ def format_ladder(risk: dict) -> str:
         lines.append("📈 上檔壓力")
         for r in reversed(res):
             labels = "/".join(r["labels"][:2])
-            lines.append(f" {strength_icon(r['strength'])} {r['price']:.1f}（{r['pct']:+.1f}%）{labels}")
-        lines.append(f"   ▲ 突破{res[0]['price']:.1f}→直攻{res[1]['price']:.1f}" if len(res) >= 2 else "")
+            mark = "※" if r.get("estimated") else ""
+            lines.append(f" {strength_icon(r['strength'])} {r['price']:.1f}（{r['pct']:+.1f}%）{labels}{mark}")
+        if len(res) >= 2:
+            lines.append(f"   ▲ 突破{res[0]['price']:.1f}→直攻{res[1]['price']:.1f}")
 
     lines.append(f"━━ 現價 {cur:.1f} ━━")
 
     if sup:
-        lines.append(f"   ▼ 跌破{sup[0]['price']:.1f}→直落{sup[1]['price']:.1f}" if len(sup) >= 2 else "")
+        if len(sup) >= 2:
+            lines.append(f"   ▼ 跌破{sup[0]['price']:.1f}→直落{sup[1]['price']:.1f}")
         lines.append("📉 下檔支撐")
         for s in sup:
             labels = "/".join(s["labels"][:2])
@@ -267,8 +287,19 @@ def format_ladder(risk: dict) -> str:
 
     if risk.get("rr"):
         rr = risk["rr"]
-        note = "✅ 划算" if rr >= 1.5 else "⚠️ 偏差" if rr < 0.8 else "➖ 普通"
-        lines.append(f"⚖️ 盈虧比 1:{rr:.2f} {note}")
+        conf = risk.get("rr_confidence", "high")
+        if conf == "low":
+            note = "※上方無壓，推估值"
+            icon = "❓"
+        elif rr >= 1.5:
+            note, icon = "划算", "✅"
+        elif rr < 0.8:
+            note, icon = "偏差，空間不足", "⚠️"
+        else:
+            note, icon = "普通", "➖"
+        lines.append(f"⚖️ 盈虧比 1:{rr:.2f} {icon} {note}")
+        if conf == "mid":
+            lines.append("   ※融資獲利高，上方賣壓可能提前出現")
 
     pnl = risk.get("margin_pnl")
     if pnl is not None:
@@ -282,7 +313,9 @@ def format_ladder(risk: dict) -> str:
     m = risk.get("margin", {})
     if m.get("recent_change") is not None:
         rc = m["recent_change"]
-        if rc > 10:
+        if rc > 30:
+            lines.append(f"🔥 融資{rc:+.0f}% 火藥大量累積，慎入")
+        elif rc > 10:
             lines.append(f"🔥 融資{rc:+.0f}% 火藥累積")
         elif rc < -10:
             lines.append(f"✅ 融資{rc:+.0f}% 籌碼沉澱")
@@ -298,7 +331,7 @@ def format_risk_map(risk: dict) -> str:
 
 
 if __name__ == "__main__":
-    for code, name in [("2347", "聯強"), ("3017", "奇鋐"), ("2376", "技嘉")]:
+    for code, name in [("2347", "聯強"), ("3017", "奇鋐"), ("2376", "技嘉"), ("6213", "聯茂")]:
         print("=" * 42)
         print(format_risk_map(build_risk_map(code, name)))
         print()
