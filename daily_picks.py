@@ -19,24 +19,25 @@ MIN_PRICE = 50.0
 MIN_FOREIGN = 300
 MIN_TRUST = 100
 
-# 金融股：28xx 全段 + 零星幾支
-FINANCE_EXTRA = {"5880", "2801", "2809", "2812", "2820", "2832", "2834", "2836",
-                 "2838", "2845", "2849", "2850", "2851", "2852", "2855", "2856",
-                 "2867", "2880", "2881", "2882", "2883", "2884", "2885", "2886",
-                 "2887", "2888", "2889", "2890", "2891", "2892", "2897"}
+MAX_REASONABLE_NET = 100000   # 單日買超上限(張)，超過視為資料異常
+
+FINANCE_EXTRA = {"5880"}
 
 
 def is_finance(code: str) -> bool:
-    if code in FINANCE_EXTRA:
-        return True
-    return len(code) == 4 and code.startswith("28")
+    return code in FINANCE_EXTRA or (len(code) == 4 and code.startswith("28"))
+
+
+def clean_name(name: str) -> str:
+    """清掉證交所特殊註記符號"""
+    return str(name).replace("*", "").replace("＊", "").strip()
 
 
 def to_num(s) -> float:
     if s is None:
         return 0.0
     s = str(s).replace(",", "").replace(" ", "").strip()
-    if s in ("", "-", "--", "---"):
+    if s in ("", "-", "--", "---", "X"):
         return 0.0
     try:
         return float(s)
@@ -73,7 +74,7 @@ def get_twse_inst(date_str: str) -> dict:
         try:
             code = str(row[idx["code"]]).strip()
             result[code] = {
-                "name": str(row[idx.get("name", 1)]).strip(),
+                "name": clean_name(row[idx.get("name", 1)]),
                 "foreign": to_num(row[idx["foreign"]]) / 1000,
                 "trust": to_num(row[idx["trust"]]) / 1000,
             }
@@ -83,23 +84,49 @@ def get_twse_inst(date_str: str) -> dict:
 
 
 def get_tpex_inst(date_str: str) -> dict:
+    """櫃買中心：用欄位名稱定位，不寫死索引"""
     roc = f"{int(date_str[:4]) - 1911}/{date_str[4:6]}/{date_str[6:]}"
     params = {"date": roc, "type": "Daily", "response": "json"}
     try:
         j = requests.get(TPEX_INST, params=params, headers=HEADERS, timeout=20).json()
     except Exception:
         return {}
-    rows = j.get("aaData") or (j.get("tables", [{}])[0].get("data", []) if j.get("tables") else [])
+
+    rows, fields = [], []
+    if j.get("tables"):
+        t = j["tables"][0]
+        rows = t.get("data", [])
+        fields = t.get("fields", [])
+    elif j.get("aaData"):
+        rows = j["aaData"]
+
+    fi = ti = None
+    if fields:
+        for i, f in enumerate(fields):
+            fs = str(f)
+            if fi is None and "外資及陸資" in fs and "不含外資自營商" in fs and "買賣超" in fs:
+                fi = i
+            elif fi is None and "外資" in fs and "買賣超" in fs and "自營" not in fs:
+                fi = i
+            if ti is None and "投信" in fs and "買賣超" in fs:
+                ti = i
+
     result = {}
     for row in rows:
         try:
             code = str(row[0]).strip()
-            if not code:
+            if not code or len(code) != 4:
+                continue
+            f_val = to_num(row[fi]) if fi is not None and len(row) > fi else 0
+            t_val = to_num(row[ti]) if ti is not None and len(row) > ti else 0
+            foreign, trust = f_val / 1000, t_val / 1000
+            # 異常值過濾
+            if abs(foreign) > MAX_REASONABLE_NET or abs(trust) > MAX_REASONABLE_NET:
                 continue
             result[code] = {
-                "name": str(row[1]).strip(),
-                "foreign": to_num(row[10]) / 1000 if len(row) > 10 else 0,
-                "trust": to_num(row[13]) / 1000 if len(row) > 13 else 0,
+                "name": clean_name(row[1]),
+                "foreign": foreign,
+                "trust": trust,
             }
         except Exception:
             continue
@@ -154,14 +181,14 @@ def calc_quality(hist: list) -> dict:
     if not closes or not highs or not lows:
         return {}
     cur = closes[-1]
-    ranges = [(highs[i] - lows[i]) / closes[i] * 100 for i in range(min(len(closes), len(highs), len(lows))) if closes[i] > 0]
+    n = min(len(closes), len(highs), len(lows))
+    ranges = [(highs[i] - lows[i]) / closes[i] * 100 for i in range(n) if closes[i] > 0]
     atr = sum(ranges) / len(ranges) if ranges else 0
     rng = (max(highs) - min(lows)) / cur * 100 if cur > 0 else 0
     avg_vol = sum(vols) / len(vols) if vols else 0
-    last_vol = vols[-1] if vols else 0
     return {
         "close": cur, "atr_pct": atr, "range_pct": rng,
-        "avg_volume": avg_vol, "last_volume": last_vol,
+        "avg_volume": avg_vol, "last_volume": vols[-1] if vols else 0,
         "pass": (atr >= MIN_ATR_PCT and rng >= MIN_RANGE_PCT
                  and avg_vol >= MIN_AVG_VOLUME and cur >= MIN_PRICE),
     }
@@ -169,7 +196,6 @@ def calc_quality(hist: list) -> dict:
 
 def calc_stars(x: dict, both: bool = False) -> int:
     s = 0
-    # 籌碼行為
     if x["streak"] >= 5:
         s += 2
     elif x["streak"] >= 3:
@@ -178,7 +204,6 @@ def calc_stars(x: dict, both: bool = False) -> int:
         s += 2
     elif x["ratio"] >= 10:
         s += 1
-    # 波動加權（活潑股加分）
     if x["atr"] >= 5:
         s += 2
     elif x["atr"] >= 3.5:
@@ -220,7 +245,7 @@ def get_daily_picks(lookback: int = 6, quality_days: int = 20) -> dict:
         time.sleep(1.0)
         if got >= quality_days:
             break
-    print(f"  取得 {got} 日資料")
+    print(f"  取得 {got} 日")
 
     quality = {}
     for code, h in hist_map.items():
@@ -247,6 +272,8 @@ def get_daily_picks(lookback: int = 6, quality_days: int = 20) -> dict:
             if not last or last[inv] < min_net:
                 continue
             net = last[inv]
+            if net > MAX_REASONABLE_NET:
+                continue
 
             streak = 0
             for d in reversed(days):
@@ -295,6 +322,13 @@ def get_daily_picks(lookback: int = 6, quality_days: int = 20) -> dict:
     for x in f_stocks + t_stocks:
         x["stars"] = calc_stars(x)
 
+    # 擴充池（給黃金組合比對用）
+    f_pool = [x for x in f_all][:25]
+    t_pool = [x for x in t_all][:25]
+    for x in f_pool + t_pool:
+        if "stars" not in x:
+            x["stars"] = calc_stars(x)
+
     etfs = []
     for code, s in stats.items():
         if code.startswith("00"):
@@ -306,6 +340,7 @@ def get_daily_picks(lookback: int = 6, quality_days: int = 20) -> dict:
     return {
         "date": last_day, "both": both[:3],
         "foreign": f_stocks, "trust": t_stocks, "etf": etfs[:3],
+        "foreign_pool": f_pool, "trust_pool": t_pool,
     }
 
 
@@ -324,19 +359,18 @@ def format_picks(picks: dict) -> str:
         for x in picks["both"]:
             lines.append(f"{stars_str(x['stars'])} {x['name']} {x['code']}")
             lines.append(f"   外資+{x['net']:.0f} 投信+{x['trust_net']:.0f}張 連{x['streak']}日")
-            lines.append(f"   現價{x['close']:.1f} 佔量{x['ratio']:.0f}% 波動{x['atr']:.1f}% 振幅{x['range']:.0f}%")
-            lines.append(f"   下檔 -8%:{x['close']*0.92:.1f} -14%:{x['close']*0.86:.1f} -20%:{x['close']*0.80:.1f}")
+            lines.append(f"   現價{x['close']:.1f} 佔量{x['ratio']:.0f}% 波動{x['atr']:.1f}%")
         lines.append("─" * 16)
 
-    lines.append("🏦 外資買超")
-    for x in picks["foreign"]:
+    lines.append("🎯 投信買超")
+    for x in picks["trust"]:
         lines.append(f"{stars_str(x['stars'])} {x['name']} {x['code']}")
         lines.append(f"   +{x['net']:.0f}張 連{x['streak']}日 佔量{x['ratio']:.0f}%")
         lines.append(f"   現價{x['close']:.1f} 波動{x['atr']:.1f}% 振幅{x['range']:.0f}%")
     lines.append("─" * 16)
 
-    lines.append("🎯 投信買超")
-    for x in picks["trust"]:
+    lines.append("🏦 外資買超")
+    for x in picks["foreign"]:
         lines.append(f"{stars_str(x['stars'])} {x['name']} {x['code']}")
         lines.append(f"   +{x['net']:.0f}張 連{x['streak']}日 佔量{x['ratio']:.0f}%")
         lines.append(f"   現價{x['close']:.1f} 波動{x['atr']:.1f}% 振幅{x['range']:.0f}%")
