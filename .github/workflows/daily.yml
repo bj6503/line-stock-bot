@@ -10,17 +10,19 @@ on:
         type: choice
         options:
           - morning
+          - morning_force
           - monitor
           - combo
           - update_watchlist
           - finmind_test
           - risk_test
           - picks_test
+          - env_test
 
 jobs:
   morning-scan:
     runs-on: ubuntu-latest
-    if: inputs.mode == 'morning'
+    if: inputs.mode == 'morning' || inputs.mode == 'morning_force'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,6 +36,7 @@ jobs:
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          FORCE_RUN: ${{ inputs.mode == 'morning_force' }}
         run: python bot.py
 
   monitor-scan:
@@ -138,3 +141,18 @@ jobs:
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python daily_picks.py
+
+  env-test:
+    runs-on: ubuntu-latest
+    if: inputs.mode == 'env_test'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安裝套件
+        run: pip install requests yfinance pandas
+      - name: 環境判讀測試
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python market_env.py
