@@ -130,3 +130,78 @@ def get_daily_picks() -> dict:
     volumes = get_volumes(list(flows.keys()), days[-1])
 
     foreign_all = score_stocks(flows, volumes, days, "foreign")
+    trust_all = score_stocks(flows, volumes, days, "trust")
+
+    # 個股 vs ETF 分開
+    foreign_stocks = [x for x in foreign_all if not x["is_etf"]][:5]
+    trust_stocks = [x for x in trust_all if not x["is_etf"]][:5]
+    etf_flows = [x for x in foreign_all if x["is_etf"]][:3]
+
+    # 雙主力同買
+    f_codes = {x["code"] for x in foreign_all[:40] if not x["is_etf"]}
+    t_codes = {x["code"] for x in trust_all[:40] if not x["is_etf"]}
+    both_codes = f_codes & t_codes
+    both = []
+    for code in both_codes:
+        f = next((x for x in foreign_all if x["code"] == code), None)
+        t = next((x for x in trust_all if x["code"] == code), None)
+        if f and t:
+            both.append({
+                "code": code,
+                "foreign": f["net_last"],
+                "trust": t["net_last"],
+                "streak": max(f["streak"], t["streak"]),
+                "score": f["score"] + t["score"],
+            })
+    both.sort(key=lambda x: -x["score"])
+
+    return {
+        "date": days[-1],
+        "foreign": foreign_stocks,
+        "trust": trust_stocks,
+        "etf": etf_flows,
+        "both": both[:3],
+    }
+
+
+def format_picks(picks: dict, names: dict = None) -> str:
+    if not picks:
+        return "無法取得法人資料"
+    names = names or {}
+
+    def nm(code):
+        return names.get(code, code)
+
+    lines = [f"📋 {picks['date']} 主力動向", "═" * 16]
+
+    if picks.get("both"):
+        lines.append("🔥 雙主力同買")
+        for b in picks["both"]:
+            lines.append(f"  {nm(b['code'])} {b['code']}")
+            lines.append(f"  外資{b['foreign']:+.0f} 投信{b['trust']:+.0f}張 連{b['streak']}日")
+        lines.append("─" * 16)
+
+    lines.append("🏦 外資買超前5")
+    for i, x in enumerate(picks["foreign"], 1):
+        lines.append(f"{i}. {nm(x['code'])} {x['code']}")
+        lines.append(f"   +{x['net_last']:.0f}張 連{x['streak']}日 佔量{x['ratio']:.1f}%")
+    lines.append("─" * 16)
+
+    lines.append("🎯 投信買超前5")
+    for i, x in enumerate(picks["trust"], 1):
+        lines.append(f"{i}. {nm(x['code'])} {x['code']}")
+        lines.append(f"   +{x['net_last']:.0f}張 連{x['streak']}日 佔量{x['ratio']:.1f}%")
+
+    if picks.get("etf"):
+        lines.append("─" * 16)
+        lines.append("📊 ETF資金（大盤氣氛）")
+        for x in picks["etf"]:
+            lines.append(f"  {nm(x['code'])} {x['code']} +{x['net_last']:.0f}張")
+
+    return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    picks = get_daily_picks()
+    print()
+    print(format_picks(picks))
