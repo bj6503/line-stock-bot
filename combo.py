@@ -4,15 +4,17 @@ import datetime
 import time
 
 from state import load_state
-from bb_squeeze import get_twse_daily, recent_weekdays, clean_name, to_num
+from bb_squeeze import get_twse_daily, recent_weekdays
 
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID = os.environ["LINE_USER_ID"]
 
 LINE_MAX_LEN = 4800
-SURGE_PCT = 4.0        # 盤中急漲門檻
-PLUNGE_PCT = -4.0      # 盤中急跌門檻
-NEAR_PCT = 1.0         # 接近關卡的距離
+SURGE_PCT = 4.0
+PLUNGE_PCT = -4.0
+NEAR_PCT = 1.0
+MIN_PRICE = 30.0
+MIN_VOLUME = 1000
 
 
 def tw_now():
@@ -49,31 +51,26 @@ def send_line_message(text: str):
                 print(r.text)
 
 
-def get_latest_market() -> dict:
-    """取得最新一日全市場行情（盤中為即時累計）"""
-    for d in reversed(recent_weekdays(6)):
+def get_two_sessions() -> tuple:
+    """一次抓出相鄰的兩個交易日行情，確保漲跌幅正確"""
+    sessions = []
+    for d in reversed(recent_weekdays(10)):
         m = get_twse_daily(d)
         if m:
-            print(f"  取得 {d} 行情 {len(m)} 筆")
-            return m
-        time.sleep(0.8)
-    return {}
+            sessions.append((d, m))
+            print(f"  取得 {d}：{len(m)} 筆")
+            if len(sessions) >= 2:
+                break
+        time.sleep(0.9)
+
+    if len(sessions) < 2:
+        return (None, {}, None, {})
+
+    (d_now, m_now), (d_prev, m_prev) = sessions[0], sessions[1]
+    return (d_now, m_now, d_prev, m_prev)
 
 
-def get_prev_market(skip_date_count: int = 2) -> dict:
-    """取得前一交易日行情，用來算漲跌"""
-    got = 0
-    for d in reversed(recent_weekdays(8)):
-        m = get_twse_daily(d)
-        if m:
-            got += 1
-            if got == skip_date_count:
-                return m
-        time.sleep(0.8)
-    return {}
-
-
-def check_watch(watch: list, market: dict) -> dict:
+def check_watch(watch: list, market: dict, prev: dict) -> dict:
     """比對早盤清單目前狀況"""
     alerts = {"break_down": [], "near_resist": [], "surge": [], "normal": []}
 
@@ -83,12 +80,14 @@ def check_watch(watch: list, market: dict) -> dict:
         if not cur or cur.get("close", 0) <= 0:
             continue
         price = cur["close"]
-        ref = w.get("ref_price") or price
-        chg = (price - ref) / ref * 100 if ref > 0 else 0
+
+        p = prev.get(code)
+        base = p["close"] if p and p.get("close", 0) > 0 else (w.get("ref_price") or price)
+        chg = (price - base) / base * 100 if base > 0 else 0
 
         item = {
             "code": code, "name": w["name"], "source": w.get("source", ""),
-            "price": price, "ref": ref, "chg": chg,
+            "price": price, "chg": chg,
             "high": cur.get("high", price), "low": cur.get("low", price),
         }
 
@@ -97,7 +96,6 @@ def check_watch(watch: list, market: dict) -> dict:
         sup2 = w.get("support2")
         res = w.get("resistance")
 
-        # 跌破起漲點 or 支撐
         if start and price < start:
             item["reason"] = f"跌破起漲點{start:.1f}"
             item["next"] = sup2 or sup
@@ -109,7 +107,6 @@ def check_watch(watch: list, market: dict) -> dict:
             alerts["break_down"].append(item)
             continue
 
-        # 逼近或突破壓力
         if res:
             gap = (res - price) / price * 100
             if gap <= 0:
@@ -131,8 +128,8 @@ def check_watch(watch: list, market: dict) -> dict:
     return alerts
 
 
-def scan_intraday(market: dict, prev: dict, exclude: set) -> dict:
-    """盤中掃描：急漲急跌"""
+def scan_moves(market: dict, prev: dict, exclude: set) -> dict:
+    """全市場急漲急跌掃描"""
     surge, plunge = [], []
     for code, cur in market.items():
         if code in exclude or len(code) != 4 or code.startswith("00"):
@@ -143,21 +140,29 @@ def scan_intraday(market: dict, prev: dict, exclude: set) -> dict:
         if not p or p.get("close", 0) <= 0:
             continue
         price = cur.get("close", 0)
-        if price < 30:
+        if price < MIN_PRICE:
             continue
         vol = cur.get("volume", 0)
-        if vol < 1000:
+        if vol < MIN_VOLUME:
             continue
+
         chg = (price - p["close"]) / p["close"] * 100
         prev_vol = p.get("volume", 0)
         vol_ratio = vol / prev_vol if prev_vol > 0 else 0
 
         item = {"code": code, "name": cur.get("name", code),
-                "price": price, "chg": chg, "vol_ratio": vol_ratio}
+                "price": price, "chg": chg, "vol_ratio": vol_ratio,
+                "high": cur.get("high", price), "low": cur.get("low", price)}
 
         if chg >= SURGE_PCT and vol_ratio >= 1.5:
             surge.append(item)
         elif chg <= PLUNGE_PCT and vol_ratio >= 2.0:
+            # 是否有下影線收回（急殺後買盤承接）
+            rng = item["high"] - item["low"]
+            if rng > 0:
+                item["recover"] = (price - item["low"]) / rng * 100
+            else:
+                item["recover"] = 0
             plunge.append(item)
 
     surge.sort(key=lambda x: -x["chg"])
@@ -165,16 +170,17 @@ def scan_intraday(market: dict, prev: dict, exclude: set) -> dict:
     return {"surge": surge[:5], "plunge": plunge[:5]}
 
 
-def build_message(state: dict, alerts: dict, intraday: dict) -> str:
+def build_message(state: dict, alerts: dict, moves: dict, date_str: str) -> str:
     now = tw_now()
-    lines = [f"⏰ {now.strftime('%m/%d %H:%M')} 盤中追蹤", ""]
+    d = f"{date_str[4:6]}/{date_str[6:]}" if date_str else now.strftime("%m/%d")
+    lines = [f"📕 {d} 收盤檢討", ""]
 
     if state.get("verdict"):
         lines.append(f"{state.get('verdict_icon', '')} 今日環境：{state['verdict']}")
         lines.append("")
 
     if alerts.get("break_down"):
-        lines.append("🚨 跌破警示（考慮出場）")
+        lines.append("🚨 跌破警示")
         lines.append("═" * 16)
         for a in alerts["break_down"]:
             lines.append(f"🔴 {a['name']} {a['code']}  {a['price']:.1f}（{a['chg']:+.1f}%）")
@@ -198,22 +204,24 @@ def build_message(state: dict, alerts: dict, intraday: dict) -> str:
             lines.append(f"  {a['name']} {a['code']} {a['price']:.1f}（{a['chg']:+.1f}%）")
         lines.append("")
 
-    if intraday.get("surge"):
-        lines.append("🚀 盤中新急漲（非早盤名單）")
+    if moves.get("surge"):
+        lines.append("🚀 今日強勢（非早盤名單）")
         lines.append("─" * 16)
-        for x in intraday["surge"]:
+        for x in moves["surge"]:
             lines.append(f"  {x['name']} {x['code']} {x['price']:.1f}"
                          f"（{x['chg']:+.1f}%）量{x['vol_ratio']:.1f}倍")
         lines.append("")
 
-    if intraday.get("plunge"):
-        lines.append("💥 盤中急跌爆量（恐慌訊號）")
+    if moves.get("plunge"):
+        lines.append("💥 急跌爆量（恐慌訊號）")
         lines.append("─" * 16)
-        for x in intraday["plunge"]:
+        for x in moves["plunge"]:
+            rec = x.get("recover", 0)
+            tag = "✅有承接" if rec >= 50 else "⚠️收最低" if rec <= 20 else ""
             lines.append(f"  {x['name']} {x['code']} {x['price']:.1f}"
-                         f"（{x['chg']:+.1f}%）量{x['vol_ratio']:.1f}倍")
-        lines.append("   ※急殺爆量可能是獵殺停損")
-        lines.append("   若後續收回可留意，續跌則避開")
+                         f"（{x['chg']:+.1f}%）量{x['vol_ratio']:.1f}倍 {tag}")
+        lines.append("   ※收回>50%代表有買盤接手，可留意")
+        lines.append("   ※收在最低則續弱，避開")
         lines.append("")
 
     if alerts.get("normal"):
@@ -224,7 +232,6 @@ def build_message(state: dict, alerts: dict, intraday: dict) -> str:
     body = "\n".join(lines).strip()
     if body.count("\n") < 4:
         return ""
-
     return body + "\n\n⚠️ 僅供參考，請自行判斷風險"
 
 
@@ -239,23 +246,20 @@ def main():
     watch = state.get("watch", [])
     print(f"  追蹤 {len(watch)} 支")
 
-    print("=== 取得最新行情 ===")
-    market = get_latest_market()
-    if not market:
+    print("=== 取得相鄰兩交易日行情 ===")
+    d_now, market, d_prev, prev = get_two_sessions()
+    if not market or not prev:
         print("行情取得失敗")
         return
-
-    print("=== 取得前日行情 ===")
-    prev = get_prev_market()
+    print(f"  最新 {d_now} vs 前日 {d_prev}")
 
     print("=== 比對早盤清單 ===")
-    alerts = check_watch(watch, market) if watch else {}
+    alerts = check_watch(watch, market, prev) if watch else {}
 
-    print("=== 盤中掃描 ===")
-    watch_codes = {w["code"] for w in watch}
-    intraday = scan_intraday(market, prev, watch_codes) if prev else {}
+    print("=== 全市場掃描 ===")
+    moves = scan_moves(market, prev, {w["code"] for w in watch})
 
-    msg = build_message(state, alerts, intraday)
+    msg = build_message(state, alerts, moves, d_now)
     if not msg:
         print("無重要訊息，不推播")
         return
