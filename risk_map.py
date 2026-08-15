@@ -5,14 +5,15 @@ import datetime
 TOKEN = os.environ.get("FINMIND_TOKEN", "")
 API_URL = "https://api.finmindtrade.com/api/v4/data"
 
-# 融資維持率分層
-LEVEL_WARN = 0.90    # 維持率150%
-LEVEL_CALL = 0.84    # 維持率140%
-LEVEL_FORCE = 0.78   # 維持率130%
+LEVEL_WARN = 0.90
+LEVEL_CALL = 0.84
+LEVEL_FORCE = 0.78
 
-MERGE_PCT = 0.03     # 3%內視為同一階
-MAX_DEPTH = 25.0     # 只看 ±25% 以內
-ATR_DAYS = 5         # ATR推估天數
+MERGE_PCT = 0.03
+MAX_DEPTH = 25.0
+MIN_GAP_PCT = 0.5      # 距離現價小於0.5%的階位不算
+ATR_DAYS = 5
+BURST_BODY = 3.0       # 當日漲幅超過此值視為剛噴出
 
 
 def fm_query(dataset: str, data_id: str = "", start_date: str = "") -> list:
@@ -37,6 +38,7 @@ def get_price_history(stock_code: str, days: int = 180) -> list:
         try:
             out.append({
                 "date": p["date"],
+                "open": float(p["open"]),
                 "close": float(p["close"]),
                 "high": float(p["max"]),
                 "low": float(p["min"]),
@@ -123,8 +125,30 @@ def round_levels(current: float) -> list:
     return [base - step, base, base + step, base + step * 2]
 
 
+def detect_burst(hist: list) -> dict:
+    """偵測是否剛噴出，並找出起漲點"""
+    if len(hist) < 5:
+        return {}
+    today = hist[-1]
+    body = (today["close"] - today["open"]) / today["open"] * 100 if today["open"] > 0 else 0
+    prev_vol = hist[-2]["volume"]
+    vol_ratio = today["volume"] / prev_vol if prev_vol > 0 else 0
+
+    if body < BURST_BODY:
+        return {}
+
+    # 起漲點：噴出前一日的低點
+    start_price = hist[-2]["low"]
+    return {
+        "is_burst": True,
+        "body": body,
+        "vol_ratio": vol_ratio,
+        "start_price": start_price,
+        "today_low": today["low"],
+    }
+
+
 def collect_levels(current: float, hist: list, margin: dict) -> list:
-    """收集所有支撐壓力候選點"""
     highs = [h["high"] for h in hist]
     lows = [h["low"] for h in hist]
     vz = find_volume_zones(hist)
@@ -163,9 +187,16 @@ def collect_levels(current: float, hist: list, margin: dict) -> list:
 
 
 def cluster_levels(raw: list, current: float, above: bool) -> list:
-    """把相近的價位合併成同一階"""
-    items = [x for x in raw if (x[1] > current) == above]
-    items = [x for x in items if abs(x[1] - current) / current * 100 <= MAX_DEPTH]
+    """合併相近階位，排除貼齊現價的無效階位"""
+    items = []
+    for name, price, kind in raw:
+        if (price > current) != above:
+            continue
+        gap = abs(price - current) / current * 100
+        if gap < MIN_GAP_PCT or gap > MAX_DEPTH:
+            continue
+        items.append((name, price, kind))
+
     items.sort(key=lambda x: x[1], reverse=not above)
 
     merged = []
@@ -180,12 +211,8 @@ def cluster_levels(raw: list, current: float, above: bool) -> list:
                 placed = True
                 break
         if not placed:
-            merged.append({
-                "price": price,
-                "labels": [name],
-                "kinds": {kind},
-                "estimated": False,
-            })
+            merged.append({"price": price, "labels": [name],
+                           "kinds": {kind}, "estimated": False})
 
     for m in merged:
         m["pct"] = (m["price"] - current) / current * 100
@@ -195,22 +222,17 @@ def cluster_levels(raw: list, current: float, above: bool) -> list:
 
 
 def add_atr_estimates(resistance: list, current: float, atr: float) -> list:
-    """上方壓力不足時補推估值（真實壓力優先，推估只補在後面）"""
     if atr <= 0:
         return resistance
-
     real_count = len([r for r in resistance if not r["estimated"]])
     if real_count >= 2:
         return resistance
 
-    # 5日合理波動 = ATR x sqrt(5)
     est_move = atr * (ATR_DAYS ** 0.5)
-    # 完全無真實壓力補2階，有1階真實補1階
     multipliers = [1.0, 1.5] if real_count == 0 else [1.0]
 
     for mult in multipliers:
         price = current * (1 + est_move * mult / 100)
-        # 不與現有階位重疊
         if all(abs(price - r["price"]) / price > MERGE_PCT for r in resistance):
             resistance.append({
                 "price": price,
@@ -220,47 +242,34 @@ def add_atr_estimates(resistance: list, current: float, atr: float) -> list:
                 "strength": 1,
                 "estimated": True,
             })
-
     resistance.sort(key=lambda x: x["price"])
     return resistance[:4]
 
 
-def evaluate_rr(resistance: list, support: list, margin_pnl) -> dict:
-    """
-    盈虧比評估
-    信心判斷只看『實際用來計算的那一階』是否為推估值
-    """
+def evaluate_rr(resistance: list, support: list, margin_pnl, burst: dict) -> dict:
     if not resistance or not support:
         return {"value": None}
 
-    r0 = resistance[0]
-    s0 = support[0]
-    up = r0["pct"]
-    down = abs(s0["pct"])
+    r0, s0 = resistance[0], support[0]
+    up, down = r0["pct"], abs(s0["pct"])
     if down <= 0:
         return {"value": None}
 
     rr = up / down
 
-    # 信心分級
-    if r0["estimated"]:
-        confidence = "low"
-        note = "上方無真實壓力，數值僅供參考"
+    if burst.get("is_burst"):
+        confidence, note = "low", "剛噴出，支撐壓力尚未成形"
+    elif r0["estimated"]:
+        confidence, note = "low", "上方無真實壓力，僅供參考"
     elif margin_pnl is not None and margin_pnl > 15:
-        confidence = "mid"
-        note = "融資獲利高，賣壓可能提前出現"
+        confidence, note = "mid", "融資獲利高，賣壓可能提前"
     else:
-        confidence = "high"
-        note = ""
+        confidence, note = "high", ""
 
     return {
-        "value": rr,
-        "confidence": confidence,
-        "note": note,
-        "up_price": r0["price"],
-        "up_pct": up,
-        "down_price": s0["price"],
-        "down_pct": s0["pct"],
+        "value": rr, "confidence": confidence, "note": note,
+        "up_price": r0["price"], "up_pct": up,
+        "down_price": s0["price"], "down_pct": s0["pct"],
     }
 
 
@@ -270,11 +279,11 @@ def build_risk_map(stock_code: str, stock_name: str = "") -> dict:
         return {}
 
     current = hist[-1]["close"]
-
     ranges = [(h["high"] - h["low"]) / h["close"] * 100 for h in hist[-20:] if h["close"] > 0]
     atr = sum(ranges) / len(ranges) if ranges else 0
 
     margin = get_margin_analysis(stock_code, hist)
+    burst = detect_burst(hist)
     raw = collect_levels(current, hist, margin)
 
     resistance = cluster_levels(raw, current, above=True)
@@ -285,7 +294,7 @@ def build_risk_map(stock_code: str, stock_name: str = "") -> dict:
     if margin.get("avg_cost"):
         margin_pnl = (current - margin["avg_cost"]) / margin["avg_cost"] * 100
 
-    rr = evaluate_rr(resistance, support, margin_pnl)
+    rr = evaluate_rr(resistance, support, margin_pnl, burst)
 
     return {
         "code": stock_code,
@@ -296,6 +305,7 @@ def build_risk_map(stock_code: str, stock_name: str = "") -> dict:
         "margin_pnl": margin_pnl,
         "ladder": {"resistance": resistance, "support": support},
         "rr": rr,
+        "burst": burst,
     }
 
 
@@ -310,7 +320,11 @@ def format_ladder(risk: dict) -> str:
     cur = risk["current"]
     res = risk.get("ladder", {}).get("resistance", [])
     sup = risk.get("ladder", {}).get("support", [])
+    burst = risk.get("burst", {})
     lines = []
+
+    if burst.get("is_burst"):
+        lines.append(f"⚡ 今日噴出+{burst['body']:.1f}%，起漲點{burst['start_price']:.1f}")
 
     if res:
         lines.append("📈 上檔壓力")
@@ -333,8 +347,7 @@ def format_ladder(risk: dict) -> str:
 
     rr = risk.get("rr", {})
     if rr.get("value") is not None:
-        v = rr["value"]
-        conf = rr["confidence"]
+        v, conf = rr["value"], rr["confidence"]
         if conf == "low":
             icon, verdict = "❓", "參考值"
         elif v >= 1.5:
@@ -357,8 +370,7 @@ def format_ladder(risk: dict) -> str:
         elif pnl < -5:
             lines.append(f"✅ 融資套牢{pnl:+.0f}%，賣壓已釋放")
 
-    m = risk.get("margin", {})
-    rc = m.get("recent_change")
+    rc = risk.get("margin", {}).get("recent_change")
     if rc is not None:
         if rc > 30:
             lines.append(f"🔥 融資{rc:+.0f}% 火藥大量累積，慎入")
@@ -378,7 +390,7 @@ def format_risk_map(risk: dict) -> str:
 
 
 if __name__ == "__main__":
-    for code, name in [("2347", "聯強"), ("3017", "奇鋐"), ("2376", "技嘉"), ("6213", "聯茂")]:
+    for code, name in [("2347", "聯強"), ("3017", "奇鋐"), ("2915", "潤泰全"), ("6278", "台表科")]:
         print("=" * 44)
         print(format_risk_map(build_risk_map(code, name)))
         print()
