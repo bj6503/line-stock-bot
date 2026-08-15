@@ -11,8 +11,9 @@ on:
         options:
           - morning
           - morning_force
-          - monitor
           - combo
+          - combo_force
+          - monitor
           - update_watchlist
           - finmind_test
           - risk_test
@@ -24,6 +25,8 @@ jobs:
   morning-scan:
     runs-on: ubuntu-latest
     if: inputs.mode == 'morning' || inputs.mode == 'morning_force'
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,6 +42,32 @@ jobs:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           FORCE_RUN: ${{ inputs.mode == 'morning_force' }}
         run: python bot.py
+      - name: 儲存追蹤清單
+        run: |
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add daily_state.json || true
+          git diff --staged --quiet || git commit -m "state: morning picks"
+          git push || echo "no push needed"
+
+  combo-scan:
+    runs-on: ubuntu-latest
+    if: inputs.mode == 'combo' || inputs.mode == 'combo_force'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安裝套件
+        run: pip install -r requirements.txt
+      - name: 收盤檢討
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          FORCE_RUN: ${{ inputs.mode == 'combo_force' }}
+        run: python combo.py
 
   monitor-scan:
     runs-on: ubuntu-latest
@@ -57,24 +86,6 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python monitor.py
-
-  combo-scan:
-    runs-on: ubuntu-latest
-    if: inputs.mode == 'combo'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: 安裝套件
-        run: pip install -r requirements.txt
-      - name: 推薦加監控
-        env:
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-        run: python combo.py
 
   update-watchlist:
     runs-on: ubuntu-latest
