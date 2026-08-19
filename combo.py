@@ -1,20 +1,14 @@
 import os
 import requests
 import datetime
-import time
 
 from state import load_state
-from bb_squeeze import get_twse_daily, recent_weekdays
+from watchlist import analyze_all, verdict, WATCHLIST
 
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID = os.environ["LINE_USER_ID"]
 
 LINE_MAX_LEN = 4800
-SURGE_PCT = 4.0
-PLUNGE_PCT = -4.0
-NEAR_PCT = 1.0
-MIN_PRICE = 30.0
-MIN_VOLUME = 1000
 
 
 def tw_now():
@@ -51,220 +45,160 @@ def send_line_message(text: str):
                 print(r.text)
 
 
-def get_two_sessions() -> tuple:
-    """一次抓出相鄰的兩個交易日行情，確保漲跌幅正確"""
-    sessions = []
-    for d in reversed(recent_weekdays(10)):
-        m = get_twse_daily(d)
-        if m:
-            sessions.append((d, m))
-            print(f"  取得 {d}：{len(m)} 筆")
-            if len(sessions) >= 2:
-                break
-        time.sleep(0.9)
+def check_events(a: dict, morning: dict) -> list:
+    """比對早盤設定的關卡，找出今日發生的事件"""
+    events = []
+    cur = a["close"]
+    bb = a.get("bb", {})
 
-    if len(sessions) < 2:
-        return (None, {}, None, {})
+    if not morning:
+        return events
 
-    (d_now, m_now), (d_prev, m_prev) = sessions[0], sessions[1]
-    return (d_now, m_now, d_prev, m_prev)
+    res = morning.get("resistance")
+    sup = morning.get("support")
+    sup2 = morning.get("support2")
+    up = morning.get("bb_upper")
+    lo = morning.get("bb_lower")
+    sig = morning.get("signal", "")
 
+    # 縮口股表態
+    if "縮口" in sig:
+        if up and cur > up:
+            events.append({"icon": "🟢", "type": "向上表態",
+                           "text": f"站上上軌{up:.1f}，縮口轉多"})
+        elif lo and cur < lo:
+            events.append({"icon": "🔴", "type": "向下表態",
+                           "text": f"跌破下軌{lo:.1f}，縮口轉空"})
 
-def check_watch(watch: list, market: dict, prev: dict) -> dict:
-    """比對早盤清單目前狀況"""
-    alerts = {"break_down": [], "near_resist": [], "surge": [], "normal": []}
+    # 突破壓力
+    if res and cur > res:
+        events.append({"icon": "🟢", "type": "突破壓力",
+                       "text": f"站上{res:.1f}"})
 
-    for w in watch:
-        code = w["code"]
-        cur = market.get(code)
-        if not cur or cur.get("close", 0) <= 0:
-            continue
-        price = cur["close"]
+    # 跌破支撐
+    if sup and cur < sup:
+        nxt = f"，下一支撐{sup2:.1f}" if sup2 else ""
+        events.append({"icon": "🔴", "type": "跌破支撐",
+                       "text": f"失守{sup:.1f}{nxt}"})
 
-        p = prev.get(code)
-        base = p["close"] if p and p.get("close", 0) > 0 else (w.get("ref_price") or price)
-        chg = (price - base) / base * 100 if base > 0 else 0
+    # 布林新訊號
+    rank = bb.get("rank", 9)
+    if rank == 0:
+        events.append({"icon": "🚀", "type": "縮口噴出",
+                       "text": f"量{bb['vol_ratio']:.1f}倍 K{bb['body']:+.1f}%"})
+    elif rank == 2:
+        events.append({"icon": "⚠️", "type": "量價背離",
+                       "text": f"量{bb['vol_ratio']:.1f}倍但K{bb['body']:+.1f}%"})
+    elif rank == 5:
+        events.append({"icon": "🔻", "type": "跌破下軌",
+                       "text": f"量{bb['vol_ratio']:.1f}倍"})
 
-        item = {
-            "code": code, "name": w["name"], "source": w.get("source", ""),
-            "price": price, "chg": chg,
-            "high": cur.get("high", price), "low": cur.get("low", price),
-        }
+    # 大漲大跌
+    if a["chg"] >= 5:
+        events.append({"icon": "📈", "type": "強勢", "text": f"大漲{a['chg']:+.1f}%"})
+    elif a["chg"] <= -5:
+        events.append({"icon": "📉", "type": "重挫", "text": f"大跌{a['chg']:+.1f}%"})
 
-        start = w.get("start_price")
-        sup = w.get("support")
-        sup2 = w.get("support2")
-        res = w.get("resistance")
-
-        if start and price < start:
-            item["reason"] = f"跌破起漲點{start:.1f}"
-            item["next"] = sup2 or sup
-            alerts["break_down"].append(item)
-            continue
-        if sup and price < sup:
-            item["reason"] = f"跌破支撐{sup:.1f}"
-            item["next"] = sup2
-            alerts["break_down"].append(item)
-            continue
-
-        if res:
-            gap = (res - price) / price * 100
-            if gap <= 0:
-                item["reason"] = f"突破壓力{res:.1f}"
-                item["broke"] = True
-                alerts["near_resist"].append(item)
-                continue
-            elif gap <= NEAR_PCT:
-                item["reason"] = f"逼近壓力{res:.1f}（差{gap:.1f}%）"
-                item["broke"] = False
-                alerts["near_resist"].append(item)
-                continue
-
-        if chg >= SURGE_PCT:
-            alerts["surge"].append(item)
-        else:
-            alerts["normal"].append(item)
-
-    return alerts
+    return events
 
 
-def scan_moves(market: dict, prev: dict, exclude: set) -> dict:
-    """全市場急漲急跌掃描"""
-    surge, plunge = [], []
-    for code, cur in market.items():
-        if code in exclude or len(code) != 4 or code.startswith("00"):
-            continue
-        if code.startswith("28") or code == "5880":
-            continue
-        p = prev.get(code)
-        if not p or p.get("close", 0) <= 0:
-            continue
-        price = cur.get("close", 0)
-        if price < MIN_PRICE:
-            continue
-        vol = cur.get("volume", 0)
-        if vol < MIN_VOLUME:
-            continue
-
-        chg = (price - p["close"]) / p["close"] * 100
-        prev_vol = p.get("volume", 0)
-        vol_ratio = vol / prev_vol if prev_vol > 0 else 0
-
-        item = {"code": code, "name": cur.get("name", code),
-                "price": price, "chg": chg, "vol_ratio": vol_ratio,
-                "high": cur.get("high", price), "low": cur.get("low", price)}
-
-        if chg >= SURGE_PCT and vol_ratio >= 1.5:
-            surge.append(item)
-        elif chg <= PLUNGE_PCT and vol_ratio >= 2.0:
-            # 是否有下影線收回（急殺後買盤承接）
-            rng = item["high"] - item["low"]
-            if rng > 0:
-                item["recover"] = (price - item["low"]) / rng * 100
-            else:
-                item["recover"] = 0
-            plunge.append(item)
-
-    surge.sort(key=lambda x: -x["chg"])
-    plunge.sort(key=lambda x: x["chg"])
-    return {"surge": surge[:5], "plunge": plunge[:5]}
-
-
-def build_message(state: dict, alerts: dict, moves: dict, date_str: str) -> str:
+def format_message(results: list, state: dict) -> str:
     now = tw_now()
-    d = f"{date_str[4:6]}/{date_str[6:]}" if date_str else now.strftime("%m/%d")
-    lines = [f"📕 {d} 收盤檢討", ""]
+    morning_map = {w["code"]: w for w in state.get("watch", [])}
 
-    if state.get("verdict"):
-        lines.append(f"{state.get('verdict_icon', '')} 今日環境：{state['verdict']}")
-        lines.append("")
+    lines = [f"📕 {now.strftime('%m/%d')} 收盤檢討", ""]
 
-    if alerts.get("break_down"):
-        lines.append("🚨 跌破警示")
+    # 事件區
+    all_events = []
+    for a in results:
+        evs = check_events(a, morning_map.get(a["code"]))
+        if evs:
+            all_events.append((a, evs))
+
+    if all_events:
+        lines.append("⚡ 今日關鍵事件")
         lines.append("═" * 16)
-        for a in alerts["break_down"]:
-            lines.append(f"🔴 {a['name']} {a['code']}  {a['price']:.1f}（{a['chg']:+.1f}%）")
-            lines.append(f"   {a['reason']}")
-            if a.get("next"):
-                lines.append(f"   下一支撐 {a['next']:.1f}")
+        for a, evs in all_events:
+            lines.append(f"{a['name']} {a['code']}  {a['close']:.1f}（{a['chg']:+.1f}%）")
+            for e in evs:
+                lines.append(f"   {e['icon']} {e['type']}：{e['text']}")
         lines.append("")
 
-    if alerts.get("near_resist"):
-        lines.append("🎯 壓力關卡")
+    # 早盤判斷驗證
+    if morning_map:
+        lines.append("📝 早盤判斷驗證")
         lines.append("═" * 16)
-        for a in alerts["near_resist"]:
-            icon = "🟢" if a.get("broke") else "🟡"
-            lines.append(f"{icon} {a['name']} {a['code']}  {a['price']:.1f}（{a['chg']:+.1f}%）")
-            lines.append(f"   {a['reason']}")
+        hits, misses = [], []
+        for a in results:
+            m = morning_map.get(a["code"])
+            if not m:
+                continue
+            lvl = m.get("level")
+            chg = a["chg"]
+            if lvl == "watch":
+                ok = chg > 0
+            elif lvl == "avoid":
+                ok = chg <= 0
+            else:
+                continue
+            entry = f"  {a['name']}{a['code']} {chg:+.1f}%（早盤{m.get('source','')}）"
+            (hits if ok else misses).append(entry)
+
+        if hits:
+            lines.append("✅ 符合預期")
+            lines.extend(hits)
+        if misses:
+            lines.append("❌ 與預期相反")
+            lines.extend(misses)
         lines.append("")
 
-    if alerts.get("surge"):
-        lines.append("📈 早盤標的走強")
-        for a in alerts["surge"]:
-            lines.append(f"  {a['name']} {a['code']} {a['price']:.1f}（{a['chg']:+.1f}%）")
+    # 明日分級
+    lines.append("📋 明日分級")
+    lines.append("═" * 16)
+    groups = {"watch": [], "hold": [], "avoid": []}
+    for a in results:
+        groups[verdict(a)["level"]].append(a)
+
+    for key, title in [("watch", "🟢 可留意"), ("hold", "🟡 觀望"), ("avoid", "🔴 避開")]:
+        items = groups[key]
+        if not items:
+            continue
+        lines.append(f"{title}（{len(items)}）")
+        for a in items:
+            v = verdict(a)
+            rr = a.get("rr")
+            rr_s = f"1:{rr:.1f}" if rr is not None else "—"
+            sig = a.get("bb", {}).get("icon", "")
+            lines.append(f"  {a['name']}{a['code']} {a['close']:.1f} "
+                         f"{a['chg']:+.1f}% ⚖️{rr_s} {sig}")
+            lines.append(f"    {v['reason']}")
         lines.append("")
 
-    if moves.get("surge"):
-        lines.append("🚀 今日強勢（非早盤名單）")
-        lines.append("─" * 16)
-        for x in moves["surge"]:
-            lines.append(f"  {x['name']} {x['code']} {x['price']:.1f}"
-                         f"（{x['chg']:+.1f}%）量{x['vol_ratio']:.1f}倍")
-        lines.append("")
-
-    if moves.get("plunge"):
-        lines.append("💥 急跌爆量（恐慌訊號）")
-        lines.append("─" * 16)
-        for x in moves["plunge"]:
-            rec = x.get("recover", 0)
-            tag = "✅有承接" if rec >= 50 else "⚠️收最低" if rec <= 20 else ""
-            lines.append(f"  {x['name']} {x['code']} {x['price']:.1f}"
-                         f"（{x['chg']:+.1f}%）量{x['vol_ratio']:.1f}倍 {tag}")
-        lines.append("   ※收回>50%代表有買盤接手，可留意")
-        lines.append("   ※收在最低則續弱，避開")
-        lines.append("")
-
-    if alerts.get("normal"):
-        lines.append("➖ 其餘早盤標的")
-        for a in alerts["normal"][:8]:
-            lines.append(f"  {a['name']} {a['code']} {a['price']:.1f}（{a['chg']:+.1f}%）")
-
-    body = "\n".join(lines).strip()
-    if body.count("\n") < 4:
-        return ""
-    return body + "\n\n⚠️ 僅供參考，請自行判斷風險"
+    lines.append("⚠️ 僅供參考，請自行判斷風險")
+    return "\n".join(lines)
 
 
 def main():
     force = os.environ.get("FORCE_RUN", "").lower() == "true"
     if not force and tw_now().weekday() >= 5:
-        print("週末不執行")
+        print("週末不執行（測試請用 combo_force）")
         return
 
     print("=== 讀取早盤記錄 ===")
     state = load_state()
-    watch = state.get("watch", [])
-    print(f"  追蹤 {len(watch)} 支")
+    print(f"  早盤記錄 {len(state.get('watch', []))} 支")
 
-    print("=== 取得相鄰兩交易日行情 ===")
-    d_now, market, d_prev, prev = get_two_sessions()
-    if not market or not prev:
-        print("行情取得失敗")
-        return
-    print(f"  最新 {d_now} vs 前日 {d_prev}")
+    print(f"=== 重新分析名單（{len(WATCHLIST)}支）===")
+    results = analyze_all()
 
-    print("=== 比對早盤清單 ===")
-    alerts = check_watch(watch, market, prev) if watch else {}
-
-    print("=== 全市場掃描 ===")
-    moves = scan_moves(market, prev, {w["code"] for w in watch})
-
-    msg = build_message(state, alerts, moves, d_now)
-    if not msg:
-        print("無重要訊息，不推播")
+    if not results:
+        print("無資料")
         return
 
+    print("=== 組合訊息 ===")
+    msg = format_message(results, state)
     print(msg)
+
     print("=== 推播 ===")
     send_line_message(msg)
     print("完成")
