@@ -47,7 +47,6 @@ def send_line_message(text: str):
 
 
 def build_watch_entries(results: list) -> list:
-    """整理成收盤檢討要追蹤的清單"""
     entries = []
     for a in results:
         v = verdict(a)
@@ -60,6 +59,7 @@ def build_watch_entries(results: list) -> list:
             "source": v["text"],
             "level": v["level"],
             "ref_price": a["close"],
+            "data_date": a.get("data_date", ""),
             "signal": bb.get("signal", "") or "中性",
             "resistance": res[0]["price"] if res else None,
             "support": sup[0]["price"] if sup else None,
@@ -73,7 +73,9 @@ def build_watch_entries(results: list) -> list:
 
 def build_message(results: list) -> str:
     now = tw_now()
-    lines = [f"📊 {now.strftime('%m/%d')} 盤前分析", ""]
+    data_date = results[0].get("data_date", "") if results else ""
+    dd = f"（資料日 {data_date[5:]}）" if data_date else ""
+    lines = [f"📊 {now.strftime('%m/%d')} 盤前分析{dd}", ""]
     lines.append(format_report(results))
     lines.append("⚠️ 僅供參考，請自行判斷風險")
     return "\n".join(lines)
