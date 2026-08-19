@@ -1,125 +1,118 @@
 {
  "watch": [
   {
-   "code": "2615",
-   "name": "萬海",
+   "code": "8070",
+   "name": "長華",
    "source": "黃金組合",
-   "ref_price": 99.6,
-   "signal": "準噴出",
-   "resistance": 105,
-   "support": 95,
-   "support2": 90,
-   "start_price": 87.0
+   "ref_price": 54.4,
+   "signal": "縮口噴出",
+   "resistance": 55.75,
+   "support": 51.58419510575908,
+   "support2": 48.59367962958691,
+   "start_price": 49.1
   },
   {
-   "code": "2049",
-   "name": "上銀",
+   "code": "6213",
+   "name": "聯茂",
    "source": "雙主力",
-   "ref_price": 381.5,
-   "signal": "雙主力買超連4日",
-   "resistance": 398.1666666666667,
-   "support": 370,
-   "support2": 344.625,
-   "start_price": 367.5
+   "ref_price": 488.0,
+   "signal": "雙主力買超連6日",
+   "resistance": 500.0,
+   "support": 475.0,
+   "support2": 366.5125,
+   "start_price": null
   },
   {
-   "code": "2486",
-   "name": "一詮",
+   "code": "2301",
+   "name": "光寶科",
    "source": "雙主力",
-   "ref_price": 238.0,
-   "signal": "雙主力買超連2日",
-   "resistance": 241.50416666666666,
-   "support": 229.46580399592483,
-   "support2": 217.4663335314316,
-   "start_price": 225.5
-  },
-  {
-   "code": "6191",
-   "name": "精成科",
-   "source": "雙主力",
-   "ref_price": 85.8,
+   "ref_price": 273.5,
    "signal": "雙主力買超連1日",
-   "resistance": 90.42466848986126,
-   "support": 84.89635725720385,
-   "support2": 79.36804602454643,
+   "resistance": 285.9,
+   "support": 270,
+   "support2": 260,
+   "start_price": null
+  },
+  {
+   "code": "3406",
+   "name": "玉晶光",
+   "source": "投信",
+   "ref_price": 685.0,
+   "signal": "投信買超連2日",
+   "resistance": 697.5,
+   "support": 654.5,
+   "support2": 604.7708333333333,
+   "start_price": null
+  },
+  {
+   "code": "3532",
+   "name": "台勝科",
+   "source": "投信",
+   "ref_price": 369.0,
+   "signal": "投信買超連4日",
+   "resistance": 380,
+   "support": 355.50416666666666,
+   "support2": 333.375,
    "start_price": null
   },
   {
    "code": "2347",
    "name": "聯強",
    "source": "投信",
-   "ref_price": 88.8,
-   "signal": "投信買超連6日",
-   "resistance": 90.37375,
-   "support": 83.08832047986289,
-   "support2": 80.15,
-   "start_price": null
+   "ref_price": 86.0,
+   "signal": "投信買超連6日"
+  },
+  {
+   "code": "2395",
+   "name": "研華",
+   "source": "投信",
+   "ref_price": 679.0,
+   "signal": "投信買超連1日"
   },
   {
    "code": "8996",
    "name": "高力",
    "source": "投信",
-   "ref_price": 1215.0,
+   "ref_price": 1175.0,
    "signal": "投信買超連6日"
   },
   {
-   "code": "3044",
-   "name": "健鼎",
-   "source": "投信",
-   "ref_price": 483.0,
-   "signal": "投信買超連3日"
-  },
-  {
-   "code": "3532",
-   "name": "台勝科",
-   "source": "投信",
-   "ref_price": 371.5,
-   "signal": "投信買超連3日"
-  },
-  {
-   "code": "4938",
-   "name": "和碩",
-   "source": "投信",
-   "ref_price": 90.3,
-   "signal": "投信買超連2日"
-  },
-  {
-   "code": "6213",
-   "name": "聯茂",
+   "code": "3605",
+   "name": "宏致",
    "source": "外資",
-   "ref_price": 481.0,
+   "ref_price": 121.0,
    "signal": "外資買超連6日"
   },
   {
-   "code": "3037",
-   "name": "欣興",
+   "code": "3017",
+   "name": "奇鋐",
    "source": "外資",
-   "ref_price": 1120.0,
-   "signal": "外資買超連6日"
+   "ref_price": 3035.0,
+   "signal": "外資買超連5日"
   },
   {
-   "code": "2426",
-   "name": "鼎元",
+   "code": "6278",
+   "name": "台表科",
    "source": "外資",
-   "ref_price": 73.2,
+   "ref_price": 172.0,
+   "signal": "外資買超連3日"
+  },
+  {
+   "code": "6505",
+   "name": "台塑化",
+   "source": "外資",
+   "ref_price": 72.0,
    "signal": "外資買超連1日"
   },
   {
-   "code": "1513",
-   "name": "中興電",
+   "code": "2603",
+   "name": "長榮",
    "source": "外資",
-   "ref_price": 171.0,
-   "signal": "外資買超連6日"
-  },
-  {
-   "code": "6271",
-   "name": "同欣電",
-   "source": "外資",
-   "ref_price": 198.0,
+   "ref_price": 238.0,
    "signal": "外資買超連4日"
   }
  ],
- "verdict": "偏多，可積極",
- "verdict_icon": "🟢",
- "date": "2026-08-18"
+ "verdict": "偏空，宜保守",
+ "verdict_icon": "🔴",
+ "date": "2026-08-19"
 }
