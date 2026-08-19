@@ -394,7 +394,6 @@ def analyze(code: str) -> dict:
             elif margin_pnl is not None and margin_pnl > 15:
                 rr_conf = "mid"
 
-    # 關注度評分
     score = 0
     if flow:
         if flow["foreign"] > 0:
@@ -445,6 +444,75 @@ def analyze_all(codes: list = None) -> list:
     return out
 
 
+def verdict(a: dict) -> dict:
+    """今日結論分級"""
+    bb = a.get("bb", {})
+    margin = a.get("margin", {})
+    flow = a.get("flow", {})
+    rr = a.get("rr")
+    rr_conf = a.get("rr_conf", "high")
+    pnl = a.get("margin_pnl")
+    rc = margin.get("recent_change")
+
+    risks, goods = [], []
+
+    if rr is not None and rr_conf != "low" and rr < 0.8:
+        risks.append("上檔空間不足")
+    if pnl is not None and pnl > 15:
+        risks.append("融資獲利高")
+    if rc is not None and rc > 25:
+        risks.append("融資暴增")
+    if bb.get("rank") == 2:
+        risks.append("量價背離")
+    if a["chg"] < -5:
+        risks.append("今日重挫")
+
+    if rr is not None and rr_conf != "low" and rr >= 1.5:
+        goods.append("盈虧比佳")
+    if pnl is not None and pnl < -5:
+        goods.append("融資套牢")
+    if rc is not None and rc < -10:
+        goods.append("籌碼沉澱")
+    if flow:
+        if flow.get("t_streak", 0) >= 3 and flow.get("trust", 0) > 0:
+            goods.append(f"投信連{flow['t_streak']}買")
+        elif flow.get("f_streak", 0) >= 3 and flow.get("foreign", 0) > 0:
+            goods.append(f"外資連{flow['f_streak']}買")
+    if bb.get("rank") in (0, 1):
+        goods.append("布林噴出")
+    elif bb.get("rank") == 3:
+        goods.append("極度縮口")
+
+    if len(risks) >= 2:
+        return {"level": "avoid", "icon": "🔴", "text": "避開",
+                "reason": "、".join(risks[:2])}
+    if risks and not goods:
+        return {"level": "avoid", "icon": "🔴", "text": "避開",
+                "reason": risks[0]}
+    if len(goods) >= 2 and not risks:
+        return {"level": "watch", "icon": "🟢", "text": "可留意",
+                "reason": "、".join(goods[:2])}
+    if goods and risks:
+        return {"level": "hold", "icon": "🟡", "text": "觀望",
+                "reason": f"{goods[0]}但{risks[0]}"}
+    if goods:
+        return {"level": "hold", "icon": "🟡", "text": "觀望",
+                "reason": goods[0]}
+    return {"level": "hold", "icon": "🟡", "text": "觀望", "reason": "無明確訊號"}
+
+
+def bw_desc(rank: float) -> str:
+    if rank <= 10:
+        return "極窄"
+    if rank <= 30:
+        return "偏窄"
+    if rank <= 70:
+        return "中等"
+    if rank <= 90:
+        return "偏寬"
+    return "極寬"
+
+
 def format_card(a: dict) -> str:
     lines = []
     bb = a.get("bb", {})
@@ -452,40 +520,39 @@ def format_card(a: dict) -> str:
     margin = a.get("margin", {})
     res = a["ladder"]["resistance"]
     sup = a["ladder"]["support"]
+    v = verdict(a)
 
-    icon = bb.get("icon", "") or "▫️"
-    ch = f"{a['chg']:+.1f}%"
-    lines.append(f"{icon} {a['name']} {a['code']}  {a['close']:.1f}（{ch}）")
+    sig_icon = bb.get("icon", "") or ""
+    lines.append(f"{v['icon']} {a['name']} {a['code']}  "
+                 f"{a['close']:.1f}（{a['chg']:+.1f}%）{sig_icon}")
+    lines.append(f"   ▸ {v['text']}：{v['reason']}")
 
-    # 法人
     if flow:
         parts = []
         if flow["foreign"] != 0:
-            s = f"連{flow['f_streak']}日" if flow["f_streak"] >= 2 else ""
+            s = f"連{flow['f_streak']}" if flow["f_streak"] >= 2 else ""
             parts.append(f"外{flow['foreign']:+.0f}{s}")
         if flow["trust"] != 0:
-            s = f"連{flow['t_streak']}日" if flow["t_streak"] >= 2 else ""
+            s = f"連{flow['t_streak']}" if flow["t_streak"] >= 2 else ""
             parts.append(f"投{flow['trust']:+.0f}{s}")
-        if parts:
-            lines.append(f"   籌碼 {' '.join(parts)}張")
-        else:
-            lines.append("   籌碼 法人無動作")
+        lines.append(f"   籌碼 {' '.join(parts) if parts else '法人無動作'}")
 
-    # 布林
-    if bb.get("signal"):
-        if bb["rank"] <= 1:
-            sq = bb["squeeze_before"] or bb["squeeze_days"]
-            tail = f" 壓縮{sq}日後" if sq else ""
-            lines.append(f"   {bb['signal']} 量{bb['vol_ratio']:.1f}倍 K{bb['body']:+.1f}%{tail}")
-        elif bb["rank"] == 2:
-            lines.append(f"   {bb['signal']} 量{bb['vol_ratio']:.1f}倍 但{bb['body']:+.1f}%")
-        else:
-            lines.append(f"   {bb['signal']}{bb['squeeze_days']}日 分位{bb['bw_rank']:.0f}"
-                         f" 上{bb['upper']:.1f}/下{bb['lower']:.1f}")
-    else:
-        lines.append(f"   布林 中性 帶寬{bb.get('bw', 0):.1f}%")
+    if bb:
+        rank = bb.get("bw_rank", 50)
+        if bb.get("signal"):
+            if bb["rank"] <= 1:
+                sq = bb["squeeze_before"] or bb["squeeze_days"]
+                tail = f" 壓縮{sq}日後" if sq else ""
+                lines.append(f"   {bb['signal']} 量{bb['vol_ratio']:.1f}倍 "
+                             f"K{bb['body']:+.1f}%{tail}")
+            elif bb["rank"] == 2:
+                lines.append(f"   {bb['signal']} 量{bb['vol_ratio']:.1f}倍 "
+                             f"但{bb['body']:+.1f}%")
+            else:
+                lines.append(f"   {bb['signal']}{bb['squeeze_days']}日 "
+                             f"上{bb['upper']:.1f}/下{bb['lower']:.1f}")
+        lines.append(f"   帶寬 {bb.get('bw', 0):.1f}%（{bw_desc(rank)}·分位{rank:.0f}）")
 
-    # 階梯
     if res:
         mark = "※" if res[0].get("estimated") else ""
         lines.append(f"   壓力 {res[0]['price']:.1f}（{res[0]['pct']:+.1f}%）{mark}")
@@ -493,13 +560,11 @@ def format_card(a: dict) -> str:
         s2 = f" 破→{sup[1]['price']:.1f}" if len(sup) >= 2 else ""
         lines.append(f"   支撐 {sup[0]['price']:.1f}（{sup[0]['pct']:+.1f}%）{s2}")
 
-    # 盈虧比
     if a.get("rr") is not None:
-        v, cf = a["rr"], a["rr_conf"]
-        ic = "❓" if cf == "low" else "✅" if v >= 1.5 else "⚠️" if v < 0.8 else "➖"
-        lines.append(f"   盈虧比 1:{v:.2f} {ic}")
+        rv, cf = a["rr"], a["rr_conf"]
+        ic = "❓" if cf == "low" else "✅" if rv >= 1.5 else "⚠️" if rv < 0.8 else "➖"
+        lines.append(f"   盈虧比 1:{rv:.2f} {ic}")
 
-    # 融資
     notes = []
     pnl = a.get("margin_pnl")
     if pnl is not None:
@@ -522,14 +587,34 @@ def format_card(a: dict) -> str:
 
 
 def format_summary(results: list) -> str:
-    lines = ["📋 觀察名單速覽", "─" * 16]
+    groups = {"watch": [], "hold": [], "avoid": []}
     for a in results:
-        bb = a.get("bb", {})
-        sig = bb.get("icon", "") or "▫️"
-        rr = a.get("rr")
-        rr_s = f"1:{rr:.1f}" if rr is not None else "—"
-        lines.append(f"{sig} {a['name']}{a['code']} {a['close']:.1f} "
-                     f"{a['chg']:+.1f}% ⚖️{rr_s}")
+        groups[verdict(a)["level"]].append(a)
+
+    lines = ["📋 今日名單速覽", "═" * 16]
+
+    for key, title in [("watch", "🟢 可留意"), ("hold", "🟡 觀望"), ("avoid", "🔴 避開")]:
+        items = groups[key]
+        if not items:
+            continue
+        lines.append(f"{title}（{len(items)}）")
+        for a in items:
+            rr = a.get("rr")
+            rr_s = f"1:{rr:.1f}" if rr is not None else "—"
+            sig = a.get("bb", {}).get("icon", "")
+            lines.append(f"  {a['name']}{a['code']} {a['close']:.1f} "
+                         f"{a['chg']:+.1f}% ⚖️{rr_s} {sig}")
+    return "\n".join(lines)
+
+
+def format_report(results: list) -> str:
+    lines = [format_summary(results), ""]
+    lines.append("═" * 16)
+    lines.append("📊 個股詳情")
+    lines.append("")
+    for a in results:
+        lines.append(format_card(a))
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -537,9 +622,4 @@ if __name__ == "__main__":
     print("開始分析觀察名單...")
     rs = analyze_all()
     print()
-    print(format_summary(rs))
-    print()
-    print("═" * 40)
-    for a in rs:
-        print(format_card(a))
-        print()
+    print(format_report(rs))
