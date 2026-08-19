@@ -13,12 +13,11 @@ on:
           - morning_force
           - combo
           - combo_force
-          - monitor
-          - update_watchlist
+          - watchlist_test
+          - env_test
           - finmind_test
           - risk_test
           - picks_test
-          - env_test
           - bb_test
 
 jobs:
@@ -69,45 +68,35 @@ jobs:
           FORCE_RUN: ${{ inputs.mode == 'combo_force' }}
         run: python combo.py
 
-  monitor-scan:
+  watchlist-test:
     runs-on: ubuntu-latest
-    if: inputs.mode == 'monitor'
+    if: inputs.mode == 'watchlist_test'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - name: 安裝套件
-        run: pip install -r requirements.txt
-      - name: 盤中監控
+        run: pip install requests
+      - name: 觀察名單測試
         env:
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-        run: python monitor.py
+        run: python watchlist.py
 
-  update-watchlist:
+  env-test:
     runs-on: ubuntu-latest
-    if: inputs.mode == 'update_watchlist'
-    permissions:
-      contents: write
+    if: inputs.mode == 'env_test'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - name: 安裝套件
-        run: pip install -r requirements.txt
-      - name: 更新股票清單
-        run: python update_watchlist.py
-      - name: 儲存清單
-        run: |
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git add watchlist.json
-          git diff --staged --quiet || git commit -m "update watchlist"
-          git push
+        run: pip install requests yfinance pandas
+      - name: 環境判讀測試
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python market_env.py
 
   finmind-test:
     runs-on: ubuntu-latest
@@ -153,21 +142,6 @@ jobs:
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python daily_picks.py
-
-  env-test:
-    runs-on: ubuntu-latest
-    if: inputs.mode == 'env_test'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: 安裝套件
-        run: pip install requests yfinance pandas
-      - name: 環境判讀測試
-        env:
-          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-        run: python market_env.py
 
   bb-test:
     runs-on: ubuntu-latest
