@@ -106,6 +106,7 @@ def get_margin(code: str, hist: list, days: int = 90) -> dict:
         "call_price": avg_cost * LEVEL_CALL,
         "force_price": avg_cost * LEVEL_FORCE,
         "recent_change": recent_change,
+        "balance": rl,
     }
 
 
@@ -134,10 +135,11 @@ def get_flow(code: str, days: int = 12) -> dict:
     dates = sorted(by_date.keys())
     last = by_date[dates[-1]]
 
-    def streak(key):
+    def streak(key, positive=True):
         s = 0
         for d in reversed(dates):
-            if by_date[d][key] > 0:
+            v = by_date[d][key]
+            if (v > 0) if positive else (v < 0):
                 s += 1
             else:
                 break
@@ -148,8 +150,10 @@ def get_flow(code: str, days: int = 12) -> dict:
         "foreign": last["foreign"],
         "trust": last["trust"],
         "dealer": last["dealer"],
-        "f_streak": streak("foreign"),
-        "t_streak": streak("trust"),
+        "f_streak": streak("foreign", True),
+        "t_streak": streak("trust", True),
+        "f_sell_streak": streak("foreign", False),
+        "t_sell_streak": streak("trust", False),
         "f_total": sum(by_date[d]["foreign"] for d in dates),
         "t_total": sum(by_date[d]["trust"] for d in dates),
     }
@@ -218,11 +222,16 @@ def analyze_bb(hist: list) -> dict:
     prior = [h["high"] for h in hist[-11:-1]]
     brk_high = today["close"] > max(prior) if prior else False
     brk_up = today["close"] > cur["upper"]
+    brk_down = today["close"] < cur["lower"]
     brk = brk_high or brk_up
 
     bw_rank = sum(1 for b in window if b < cur["bw"]) / len(window) * 100
     strong = red and body >= MIN_BODY_PCT
     diverge = vol_r >= DIVERGE_VOL and body < MIN_BODY_PCT
+
+    # 位置：現價在通道的哪個位置（0=下軌, 100=上軌）
+    span = cur["upper"] - cur["lower"]
+    pos = ((today["close"] - cur["lower"]) / span * 100) if span > 0 else 50
 
     if was_sq and strong and vol_r >= VOLUME_MULTIPLE and brk:
         sig, icon, rank = "縮口噴出", "🚀", 0
@@ -230,6 +239,8 @@ def analyze_bb(hist: list) -> dict:
         sig, icon, rank = "準噴出", "⚡", 1
     elif diverge:
         sig, icon, rank = "量價背離", "⚠️", 2
+    elif was_sq and brk_down and vol_r >= VOLUME_WARN:
+        sig, icon, rank = "破下軌", "🔻", 5
     elif in_sq and sq_days >= 8:
         sig, icon, rank = "極度縮口", "🔵", 3
     elif in_sq and sq_days >= 4:
@@ -239,10 +250,10 @@ def analyze_bb(hist: list) -> dict:
 
     return {
         "upper": cur["upper"], "mid": cur["mid"], "lower": cur["lower"],
-        "bw": cur["bw"], "bw_rank": bw_rank,
+        "bw": cur["bw"], "bw_rank": bw_rank, "position": pos,
         "in_squeeze": in_sq, "squeeze_days": sq_days, "squeeze_before": sq_before,
         "body": body, "vol_ratio": vol_r, "red": red,
-        "break_high": brk_high, "break_upper": brk_up,
+        "break_high": brk_high, "break_upper": brk_up, "break_lower": brk_down,
         "signal": sig, "icon": icon, "rank": rank,
     }
 
@@ -282,7 +293,7 @@ def round_levels(cur: float) -> list:
     return [base - step, base, base + step, base + step * 2]
 
 
-def build_ladder(cur: float, hist: list, margin: dict, atr: float) -> dict:
+def build_ladder(cur: float, hist: list, margin: dict, atr: float, bb: dict) -> dict:
     highs = [h["high"] for h in hist]
     lows = [h["low"] for h in hist]
     vz = volume_zones(hist)
@@ -309,6 +320,9 @@ def build_ladder(cur: float, hist: list, margin: dict, atr: float) -> dict:
         raw.append(("融資警戒", margin["warn_price"], "融資"))
         raw.append(("融資追繳", margin["call_price"], "融資"))
         raw.append(("融資斷頭", margin["force_price"], "融資"))
+    if bb.get("upper"):
+        raw.append(("布林上軌", bb["upper"], "布林"))
+        raw.append(("布林下軌", bb["lower"], "布林"))
     for r in round_levels(cur):
         if r > 0:
             raw.append((f"整數{r:.0f}", r, "心理"))
@@ -376,7 +390,7 @@ def analyze(code: str) -> dict:
     margin = get_margin(code, hist)
     flow = get_flow(code)
     bb = analyze_bb(hist)
-    ladder = build_ladder(cur, hist, margin, atr)
+    ladder = build_ladder(cur, hist, margin, atr, bb)
 
     margin_pnl = None
     if margin.get("avg_cost"):
@@ -402,8 +416,10 @@ def analyze(code: str) -> dict:
             score += min(flow["t_streak"], 5) * 1.5
         if flow["foreign"] > 0 and flow["trust"] > 0:
             score += 4
+        if flow["f_sell_streak"] >= 3:
+            score -= 3
     if bb:
-        score += {0: 10, 1: 7, 2: -5, 3: 6, 4: 3}.get(bb["rank"], 0)
+        score += {0: 10, 1: 7, 2: -5, 3: 6, 4: 4, 5: -6}.get(bb["rank"], 0)
     if rr is not None and rr_conf != "low":
         if rr >= 2:
             score += 5
@@ -411,8 +427,8 @@ def analyze(code: str) -> dict:
             score += 3
         elif rr < 0.8:
             score -= 4
-    if margin.get("recent_change") is not None:
-        rc = margin["recent_change"]
+    rc = margin.get("recent_change")
+    if rc is not None:
         if rc > 30:
             score -= 4
         elif rc < -10:
@@ -453,20 +469,27 @@ def verdict(a: dict) -> dict:
     rr_conf = a.get("rr_conf", "high")
     pnl = a.get("margin_pnl")
     rc = margin.get("recent_change")
+    rank = bb.get("rank", 9)
 
     risks, goods = [], []
 
+    # ===== 風險 =====
     if rr is not None and rr_conf != "low" and rr < 0.8:
         risks.append("上檔空間不足")
     if pnl is not None and pnl > 15:
         risks.append("融資獲利高")
     if rc is not None and rc > 25:
         risks.append("融資暴增")
-    if bb.get("rank") == 2:
+    if rank == 2:
         risks.append("量價背離")
+    if rank == 5:
+        risks.append("跌破下軌")
     if a["chg"] < -5:
         risks.append("今日重挫")
+    if flow.get("f_sell_streak", 0) >= 3:
+        risks.append(f"外資連{flow['f_sell_streak']}賣")
 
+    # ===== 優點 =====
     if rr is not None and rr_conf != "low" and rr >= 1.5:
         goods.append("盈虧比佳")
     if pnl is not None and pnl < -5:
@@ -478,11 +501,16 @@ def verdict(a: dict) -> dict:
             goods.append(f"投信連{flow['t_streak']}買")
         elif flow.get("f_streak", 0) >= 3 and flow.get("foreign", 0) > 0:
             goods.append(f"外資連{flow['f_streak']}買")
-    if bb.get("rank") in (0, 1):
-        goods.append("布林噴出")
-    elif bb.get("rank") == 3:
-        goods.append("極度縮口")
+    if rank == 0:
+        goods.append("縮口噴出")
+    elif rank == 1:
+        goods.append("準噴出")
+    elif rank == 3:
+        goods.append(f"極度縮口{bb.get('squeeze_days', 0)}日")
+    elif rank == 4:
+        goods.append(f"縮口{bb.get('squeeze_days', 0)}日")
 
+    # ===== 分級 =====
     if len(risks) >= 2:
         return {"level": "avoid", "icon": "🔴", "text": "避開",
                 "reason": "、".join(risks[:2])}
@@ -513,6 +541,41 @@ def bw_desc(rank: float) -> str:
     return "極寬"
 
 
+def pos_desc(pos: float) -> str:
+    if pos >= 85:
+        return "貼上軌"
+    if pos >= 60:
+        return "偏上"
+    if pos >= 40:
+        return "中間"
+    if pos >= 15:
+        return "偏下"
+    return "貼下軌"
+
+
+def action_hint(a: dict) -> str:
+    """具體操作提示"""
+    bb = a.get("bb", {})
+    rank = bb.get("rank", 9)
+    res = a["ladder"]["resistance"]
+    sup = a["ladder"]["support"]
+
+    if rank in (3, 4):
+        return (f"等表態：站上{bb['upper']:.1f}轉多／"
+                f"跌破{bb['lower']:.1f}轉空")
+    if rank in (0, 1):
+        if sup:
+            return f"追高需設停損{sup[0]['price']:.1f}"
+        return "追高需嚴設停損"
+    if rank == 2:
+        return "爆量不漲，先觀察"
+    if rank == 5:
+        return "已破下軌，勿接刀"
+    if res and sup:
+        return f"區間 {sup[0]['price']:.1f}～{res[0]['price']:.1f}"
+    return ""
+
+
 def format_card(a: dict) -> str:
     lines = []
     bb = a.get("bb", {})
@@ -527,10 +590,16 @@ def format_card(a: dict) -> str:
                  f"{a['close']:.1f}（{a['chg']:+.1f}%）{sig_icon}")
     lines.append(f"   ▸ {v['text']}：{v['reason']}")
 
+    hint = action_hint(a)
+    if hint:
+        lines.append(f"   ▸ {hint}")
+
     if flow:
         parts = []
         if flow["foreign"] != 0:
             s = f"連{flow['f_streak']}" if flow["f_streak"] >= 2 else ""
+            if flow["foreign"] < 0 and flow["f_sell_streak"] >= 2:
+                s = f"連賣{flow['f_sell_streak']}"
             parts.append(f"外{flow['foreign']:+.0f}{s}")
         if flow["trust"] != 0:
             s = f"連{flow['t_streak']}" if flow["t_streak"] >= 2 else ""
@@ -539,19 +608,21 @@ def format_card(a: dict) -> str:
 
     if bb:
         rank = bb.get("bw_rank", 50)
+        pos = bb.get("position", 50)
         if bb.get("signal"):
             if bb["rank"] <= 1:
                 sq = bb["squeeze_before"] or bb["squeeze_days"]
                 tail = f" 壓縮{sq}日後" if sq else ""
                 lines.append(f"   {bb['signal']} 量{bb['vol_ratio']:.1f}倍 "
                              f"K{bb['body']:+.1f}%{tail}")
-            elif bb["rank"] == 2:
+            elif bb["rank"] in (2, 5):
                 lines.append(f"   {bb['signal']} 量{bb['vol_ratio']:.1f}倍 "
-                             f"但{bb['body']:+.1f}%")
+                             f"K{bb['body']:+.1f}%")
             else:
                 lines.append(f"   {bb['signal']}{bb['squeeze_days']}日 "
                              f"上{bb['upper']:.1f}/下{bb['lower']:.1f}")
-        lines.append(f"   帶寬 {bb.get('bw', 0):.1f}%（{bw_desc(rank)}·分位{rank:.0f}）")
+        lines.append(f"   帶寬{bb.get('bw', 0):.1f}%（{bw_desc(rank)}·分位{rank:.0f}）"
+                     f"｜位置{pos_desc(pos)}")
 
     if res:
         mark = "※" if res[0].get("estimated") else ""
