@@ -46,22 +46,21 @@ def send_line_message(text: str):
 
 
 def check_events(a: dict, morning: dict) -> list:
-    """比對早盤設定的關卡，找出今日發生的事件"""
+    """比對早盤設定的關卡"""
     events = []
-    cur = a["close"]
-    bb = a.get("bb", {})
-
     if not morning:
         return events
 
+    cur = a["close"]
+    bb = a.get("bb", {})
     res = morning.get("resistance")
     sup = morning.get("support")
     sup2 = morning.get("support2")
     up = morning.get("bb_upper")
     lo = morning.get("bb_lower")
     sig = morning.get("signal", "")
+    ref = morning.get("ref_price")
 
-    # 縮口股表態
     if "縮口" in sig:
         if up and cur > up:
             events.append({"icon": "🟢", "type": "向上表態",
@@ -70,18 +69,12 @@ def check_events(a: dict, morning: dict) -> list:
             events.append({"icon": "🔴", "type": "向下表態",
                            "text": f"跌破下軌{lo:.1f}，縮口轉空"})
 
-    # 突破壓力
-    if res and cur > res:
-        events.append({"icon": "🟢", "type": "突破壓力",
-                       "text": f"站上{res:.1f}"})
-
-    # 跌破支撐
-    if sup and cur < sup:
+    if res and ref and ref <= res < cur:
+        events.append({"icon": "🟢", "type": "突破壓力", "text": f"站上{res:.1f}"})
+    if sup and ref and cur < sup <= ref:
         nxt = f"，下一支撐{sup2:.1f}" if sup2 else ""
-        events.append({"icon": "🔴", "type": "跌破支撐",
-                       "text": f"失守{sup:.1f}{nxt}"})
+        events.append({"icon": "🔴", "type": "跌破支撐", "text": f"失守{sup:.1f}{nxt}"})
 
-    # 布林新訊號
     rank = bb.get("rank", 9)
     if rank == 0:
         events.append({"icon": "🚀", "type": "縮口噴出",
@@ -93,7 +86,6 @@ def check_events(a: dict, morning: dict) -> list:
         events.append({"icon": "🔻", "type": "跌破下軌",
                        "text": f"量{bb['vol_ratio']:.1f}倍"})
 
-    # 大漲大跌
     if a["chg"] >= 5:
         events.append({"icon": "📈", "type": "強勢", "text": f"大漲{a['chg']:+.1f}%"})
     elif a["chg"] <= -5:
@@ -102,13 +94,75 @@ def check_events(a: dict, morning: dict) -> list:
     return events
 
 
+def build_verify(results: list, morning_map: dict) -> tuple:
+    """
+    驗證早盤判斷
+    回傳 (是否有效, 訊息行list)
+    只有當收盤資料日期 > 早盤資料日期時才算有效驗證
+    """
+    if not morning_map:
+        return False, ["（無早盤記錄可比對）"]
+
+    m_dates = {m.get("data_date") for m in morning_map.values() if m.get("data_date")}
+    today_dates = {a.get("data_date") for a in results}
+    m_date = max(m_dates) if m_dates else ""
+    t_date = max(today_dates) if today_dates else ""
+
+    if not m_date or not t_date or t_date <= m_date:
+        return False, [
+            f"⚠️ 收盤資料尚未更新（仍為 {t_date[5:] if t_date else '?'}）",
+            "   明日開盤前會自動完成驗證",
+        ]
+
+    lines = [f"（{m_date[5:]} 收盤 → {t_date[5:]} 收盤）"]
+    hits, misses, neutral = [], [], []
+
+    for a in results:
+        m = morning_map.get(a["code"])
+        if not m:
+            continue
+        ref = m.get("ref_price")
+        if not ref:
+            continue
+        move = (a["close"] - ref) / ref * 100
+        lvl = m.get("level")
+        row = (f"  {a['name']}{a['code']} {ref:.1f}→{a['close']:.1f}"
+               f"（{move:+.1f}%）")
+
+        if lvl == "watch":
+            (hits if move > 0 else misses).append(row + " 早盤可留意")
+        elif lvl == "avoid":
+            (hits if move <= 0 else misses).append(row + " 早盤避開")
+        else:
+            neutral.append(row + " 早盤觀望")
+
+    if hits:
+        lines.append(f"✅ 符合預期（{len(hits)}）")
+        lines.extend(hits)
+    if misses:
+        lines.append(f"❌ 與預期相反（{len(misses)}）")
+        lines.extend(misses)
+    if neutral:
+        lines.append(f"➖ 觀望組（{len(neutral)}）")
+        lines.extend(neutral)
+
+    total = len(hits) + len(misses)
+    if total:
+        rate = len(hits) / total * 100
+        lines.append(f"   命中率 {rate:.0f}%（{len(hits)}/{total}）")
+
+    return True, lines
+
+
 def format_message(results: list, state: dict) -> str:
     now = tw_now()
     morning_map = {w["code"]: w for w in state.get("watch", [])}
+    data_date = results[0].get("data_date", "") if results else ""
+    dd = f"（資料日 {data_date[5:]}）" if data_date else ""
 
-    lines = [f"📕 {now.strftime('%m/%d')} 收盤檢討", ""]
+    lines = [f"📕 {now.strftime('%m/%d')} 收盤檢討{dd}", ""]
 
-    # 事件區
+    # 事件
     all_events = []
     for a in results:
         evs = check_events(a, morning_map.get(a["code"]))
@@ -116,7 +170,7 @@ def format_message(results: list, state: dict) -> str:
             all_events.append((a, evs))
 
     if all_events:
-        lines.append("⚡ 今日關鍵事件")
+        lines.append("⚡ 關鍵事件")
         lines.append("═" * 16)
         for a, evs in all_events:
             lines.append(f"{a['name']} {a['code']}  {a['close']:.1f}（{a['chg']:+.1f}%）")
@@ -124,33 +178,12 @@ def format_message(results: list, state: dict) -> str:
                 lines.append(f"   {e['icon']} {e['type']}：{e['text']}")
         lines.append("")
 
-    # 早盤判斷驗證
-    if morning_map:
-        lines.append("📝 早盤判斷驗證")
-        lines.append("═" * 16)
-        hits, misses = [], []
-        for a in results:
-            m = morning_map.get(a["code"])
-            if not m:
-                continue
-            lvl = m.get("level")
-            chg = a["chg"]
-            if lvl == "watch":
-                ok = chg > 0
-            elif lvl == "avoid":
-                ok = chg <= 0
-            else:
-                continue
-            entry = f"  {a['name']}{a['code']} {chg:+.1f}%（早盤{m.get('source','')}）"
-            (hits if ok else misses).append(entry)
-
-        if hits:
-            lines.append("✅ 符合預期")
-            lines.extend(hits)
-        if misses:
-            lines.append("❌ 與預期相反")
-            lines.extend(misses)
-        lines.append("")
+    # 驗證
+    lines.append("📝 早盤判斷驗證")
+    lines.append("═" * 16)
+    ok, vlines = build_verify(results, morning_map)
+    lines.extend(vlines)
+    lines.append("")
 
     # 明日分級
     lines.append("📋 明日分級")
@@ -185,15 +218,15 @@ def main():
         return
 
     print("=== 讀取早盤記錄 ===")
-    state = load_state()
-    print(f"  早盤記錄 {len(state.get('watch', []))} 支")
+    state = load_state(allow_stale=True)
+    print(f"  早盤記錄 {len(state.get('watch', []))} 支（{state.get('date', '無')}）")
 
     print(f"=== 重新分析名單（{len(WATCHLIST)}支）===")
     results = analyze_all()
-
     if not results:
         print("無資料")
         return
+    print(f"  資料日期：{results[0].get('data_date')}")
 
     print("=== 組合訊息 ===")
     msg = format_message(results, state)
