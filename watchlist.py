@@ -29,6 +29,8 @@ MAX_DEPTH = 25.0
 MIN_GAP_PCT = 0.5
 ATR_DAYS = 5
 
+SELL_STREAK_WARN = 2      # 法人連賣幾日視為風險
+
 
 def fm_query(dataset: str, data_id: str = "", start_date: str = "") -> list:
     params = {"dataset": dataset, "token": TOKEN}
@@ -229,7 +231,6 @@ def analyze_bb(hist: list) -> dict:
     strong = red and body >= MIN_BODY_PCT
     diverge = vol_r >= DIVERGE_VOL and body < MIN_BODY_PCT
 
-    # 位置：現價在通道的哪個位置（0=下軌, 100=上軌）
     span = cur["upper"] - cur["lower"]
     pos = ((today["close"] - cur["lower"]) / span * 100) if span > 0 else 50
 
@@ -416,8 +417,10 @@ def analyze(code: str) -> dict:
             score += min(flow["t_streak"], 5) * 1.5
         if flow["foreign"] > 0 and flow["trust"] > 0:
             score += 4
-        if flow["f_sell_streak"] >= 3:
-            score -= 3
+        if flow["f_sell_streak"] >= SELL_STREAK_WARN:
+            score -= flow["f_sell_streak"]
+        if flow["t_sell_streak"] >= SELL_STREAK_WARN:
+            score -= flow["t_sell_streak"] * 1.5
     if bb:
         score += {0: 10, 1: 7, 2: -5, 3: 6, 4: 4, 5: -6}.get(bb["rank"], 0)
     if rr is not None and rr_conf != "low":
@@ -438,6 +441,8 @@ def analyze(code: str) -> dict:
 
     return {
         "code": code, "name": name, "close": cur, "chg": chg,
+        "data_date": hist[-1]["date"],
+        "prev_date": hist[-2]["date"],
         "atr": atr, "volume": hist[-1]["volume"],
         "margin": margin, "margin_pnl": margin_pnl,
         "flow": flow, "bb": bb, "ladder": ladder,
@@ -461,7 +466,6 @@ def analyze_all(codes: list = None) -> list:
 
 
 def verdict(a: dict) -> dict:
-    """今日結論分級"""
     bb = a.get("bb", {})
     margin = a.get("margin", {})
     flow = a.get("flow", {})
@@ -486,8 +490,12 @@ def verdict(a: dict) -> dict:
         risks.append("跌破下軌")
     if a["chg"] < -5:
         risks.append("今日重挫")
-    if flow.get("f_sell_streak", 0) >= 3:
-        risks.append(f"外資連{flow['f_sell_streak']}賣")
+    fss = flow.get("f_sell_streak", 0)
+    tss = flow.get("t_sell_streak", 0)
+    if fss >= SELL_STREAK_WARN:
+        risks.append(f"外資連{fss}賣")
+    if tss >= SELL_STREAK_WARN:
+        risks.append(f"投信連{tss}賣")
 
     # ===== 優點 =====
     if rr is not None and rr_conf != "low" and rr >= 1.5:
@@ -510,7 +518,6 @@ def verdict(a: dict) -> dict:
     elif rank == 4:
         goods.append(f"縮口{bb.get('squeeze_days', 0)}日")
 
-    # ===== 分級 =====
     if len(risks) >= 2:
         return {"level": "avoid", "icon": "🔴", "text": "避開",
                 "reason": "、".join(risks[:2])}
@@ -554,7 +561,6 @@ def pos_desc(pos: float) -> str:
 
 
 def action_hint(a: dict) -> str:
-    """具體操作提示"""
     bb = a.get("bb", {})
     rank = bb.get("rank", 9)
     res = a["ladder"]["resistance"]
@@ -597,12 +603,20 @@ def format_card(a: dict) -> str:
     if flow:
         parts = []
         if flow["foreign"] != 0:
-            s = f"連{flow['f_streak']}" if flow["f_streak"] >= 2 else ""
             if flow["foreign"] < 0 and flow["f_sell_streak"] >= 2:
                 s = f"連賣{flow['f_sell_streak']}"
+            elif flow["f_streak"] >= 2:
+                s = f"連買{flow['f_streak']}"
+            else:
+                s = ""
             parts.append(f"外{flow['foreign']:+.0f}{s}")
         if flow["trust"] != 0:
-            s = f"連{flow['t_streak']}" if flow["t_streak"] >= 2 else ""
+            if flow["trust"] < 0 and flow["t_sell_streak"] >= 2:
+                s = f"連賣{flow['t_sell_streak']}"
+            elif flow["t_streak"] >= 2:
+                s = f"連買{flow['t_streak']}"
+            else:
+                s = ""
             parts.append(f"投{flow['trust']:+.0f}{s}")
         lines.append(f"   籌碼 {' '.join(parts) if parts else '法人無動作'}")
 
@@ -692,5 +706,6 @@ def format_report(results: list) -> str:
 if __name__ == "__main__":
     print("開始分析觀察名單...")
     rs = analyze_all()
-    print()
+    if rs:
+        print(f"\n資料日期：{rs[0]['data_date']}（前一日 {rs[0]['prev_date']}）\n")
     print(format_report(rs))
