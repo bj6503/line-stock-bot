@@ -2,12 +2,12 @@ import os
 import requests
 import datetime
 
-from watchlist import analyze_all, format_report, verdict, WATCHLIST
+from watchlist import (analyze_all, format_report, verdict,
+                       WATCHLIST, CORE, WATCH)
 from state import save_state
 
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID = os.environ["LINE_USER_ID"]
-
 LINE_MAX_LEN = 4800
 
 
@@ -36,7 +36,17 @@ def send_line_message(text: str):
         "Content-Type": "application/json"
     }
     chunks = split_message(text)
-    for uid in [u.strip() for u in LINE_USER_ID.split(",") if u.strip()]:
+    uids = [u.strip() for u in LINE_USER_ID.split(",") if u.strip()]
+
+    # 額度預警：一次推播吃掉的則數 = 收件人數 × 分段數
+    cost = len(uids) * len(chunks)
+    if len(chunks) > 1:
+        print(f"⚠️ 訊息 {len(text)} 字被切成 {len(chunks)} 段，"
+              f"本次吃掉 {cost} 則額度（免費版每月 200 則）")
+    else:
+        print(f"本次推播吃掉 {cost} 則額度")
+
+    for uid in uids:
         for i, chunk in enumerate(chunks):
             body = {"to": uid, "messages": [{"type": "text", "text": chunk}]}
             r = requests.post("https://api.line.me/v2/bot/message/push",
@@ -47,8 +57,19 @@ def send_line_message(text: str):
 
 
 def build_watch_entries(results: list) -> list:
+    """
+    寫進 daily_state.json 的關卡清單。
+
+    [!] 只收核心名單。
+    系統 C（元大 live_monitor.py）就是讀這個檔案決定要訂閱哪些股票、
+    盤中觸發哪些關卡。觀察名單若也寫進來，元大端會一次訂閱三十幾支，
+    盤中推播次數會失控、LINE 額度直接爆掉。
+    觀察名單只出現在每日盤前訊息，不進盤中監控。
+    """
     entries = []
     for a in results:
+        if a["code"] not in CORE:
+            continue
         v = verdict(a)
         res = a["ladder"]["resistance"]
         sup = a["ladder"]["support"]
@@ -67,6 +88,9 @@ def build_watch_entries(results: list) -> list:
             "bb_upper": bb.get("upper"),
             "bb_lower": bb.get("lower"),
             "rr": a.get("rr"),
+            # 新增欄位，live_monitor.py 用不到也不會壞
+            "category": a.get("category", ""),
+            "tier": "core",
         })
     return entries
 
@@ -87,17 +111,18 @@ def main():
         print("週末不執行（測試請用 morning_force）")
         return
 
-    print(f"=== 分析觀察名單（{len(WATCHLIST)}支）===")
+    print(f"=== 分析名單（核心 {len(CORE)} 支 / 觀察 {len(WATCH)} 支 "
+          f"/ 合計 {len(WATCHLIST)} 支）===")
     results = analyze_all()
-
     if not results:
         print("無資料")
         send_line_message("⚠️ 今日資料取得失敗，請檢查系統")
         return
 
     print("=== 儲存追蹤清單 ===")
-    save_state({"watch": build_watch_entries(results)})
-    print(f"  記錄 {len(results)} 支")
+    entries = build_watch_entries(results)
+    save_state({"watch": entries})
+    print(f"  分析 {len(results)} 支，寫入 state {len(entries)} 支（僅核心）")
 
     print("=== 組合訊息 ===")
     msg = build_message(results)
