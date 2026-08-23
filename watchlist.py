@@ -36,6 +36,15 @@ WATCHLIST = CORE + WATCH
 BB_PERIOD = 20
 BB_STD = 2.0
 SQUEEZE_PCT = 25
+
+# 帶寬分位數要比對的樣本數（「近120日」的120就是這個）
+BW_WINDOW = 120
+# 套牢區取樣窗口，固定住才不會隨抓取天數浮動
+VZ_WINDOW = 120
+# 抓幾個「日曆天」。BW_WINDOW 需要 120+BB_PERIOD-1 = 139 個「交易日」，
+# 換算日曆天約 207 天。原本設 200 只拿得到約 118 筆帶寬，永遠差一點，
+# 導致每支都被判定資料不足。拉到 300 留足餘裕（約 182 筆）。
+HIST_DAYS = 300
 VOLUME_MULTIPLE = 2.0
 VOLUME_WARN = 1.5
 MIN_BODY_PCT = 2.0
@@ -77,7 +86,7 @@ def get_stock_name(code: str) -> str:
     return code
 
 
-def get_history(code: str, days: int = 200) -> list:
+def get_history(code: str, days: int = HIST_DAYS) -> list:
     start = (datetime.date.today() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
     out = []
     for p in fm_query("TaiwanStockPrice", code, start):
@@ -206,7 +215,7 @@ def analyze_bb(hist: list) -> dict:
             bws.append(b["bw"])
     if len(bws) < 15:
         return {}
-    window = bws[-120:] if len(bws) >= 120 else bws
+    window = bws[-BW_WINDOW:] if len(bws) >= BW_WINDOW else bws
     cur = calc_bb(closes)
     thr = percentile(window, SQUEEZE_PCT)
     in_sq = cur["bw"] <= thr
@@ -263,7 +272,7 @@ def analyze_bb(hist: list) -> dict:
         "body": body, "vol_ratio": vol_r, "red": red,
         "break_high": brk_high, "break_upper": brk_up, "break_lower": brk_down,
         "signal": sig, "icon": icon, "rank": rank,
-        # 分位數樣本數：<120 表示資料不足，縮口判定可信度打折
+        # 分位數樣本數：< BW_WINDOW 表示資料不足，縮口判定可信度打折
         "window_size": len(window),
     }
 
@@ -277,6 +286,8 @@ def calc_ma(hist: list, n: int) -> float:
 def volume_zones(hist: list) -> dict:
     if len(hist) < 20:
         return {}
+    # 只看最近 VZ_WINDOW 根，避免套牢區隨抓取天數浮動
+    hist = hist[-VZ_WINDOW:]
     vols = [h["volume"] for h in hist]
     thr = sorted(vols, reverse=True)[max(1, len(vols) // 4)]
     heavy = [h for h in hist if h["volume"] >= thr]
@@ -449,7 +460,7 @@ def analyze(code: str) -> dict:
         score -= 2
 
     # 資料是否足以支撐縮口判定：分位樣本 <120 就標記
-    thin = bool(bb) and bb.get("window_size", 999) < 120
+    thin = bool(bb) and bb.get("window_size", 999) < BW_WINDOW
     if _is_new_listing(code):
         thin = True
 
@@ -465,6 +476,7 @@ def analyze(code: str) -> dict:
         "tier": "core" if code in CORE else "watch",
         "thin_data": thin,
         "bars": len(hist),
+        "bw_window": bb.get("window_size", 0) if bb else 0,
     }
 
 
@@ -634,7 +646,8 @@ def format_card(a: dict) -> str:
         lines.append(f"  ▸ {hint}")
 
     if a.get("thin_data"):
-        lines.append(f"  ▸ ⚠️ 僅{a.get('bars', 0)}根K線，縮口分位可信度低")
+        lines.append(f"  ▸ ⚠️ 分位樣本僅{a.get('bw_window', 0)}筆"
+                     f"（需{BW_WINDOW}），縮口判定可信度低")
 
     if flow:
         parts = []
