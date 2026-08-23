@@ -6,11 +6,32 @@ import time
 TOKEN = os.environ.get("FINMIND_TOKEN", "")
 API_URL = "https://api.finmindtrade.com/api/v4/data"
 
-# ===== 觀察名單（要改在這裡改）=====
-WATCHLIST = [
-    "1519", "7799", "2454", "6526", "2308",
-    "5351", "6239", "6841", "7887", "6223", "3081",
-]
+# ===== 觀察名單（改名單請改 categories.py，不要改這裡）=====
+# categories.py 缺席時自動退回原本的 11 支，不會讓整支程式掛掉。
+try:
+    from categories import CORE, WATCH
+    from categories import category as _category
+    from categories import is_new_listing as _is_new_listing
+    from categories import by_category as _by_category
+    _HAS_CAT = True
+except ImportError:
+    CORE = [
+        "1519", "7799", "2454", "6526", "2308",
+        "5351", "6239", "6841", "7887", "6223", "3081",
+    ]
+    WATCH = []
+    _HAS_CAT = False
+
+    def _category(code):
+        return ""
+
+    def _is_new_listing(code):
+        return False
+
+    def _by_category(codes):
+        return [("", list(codes))]
+
+WATCHLIST = CORE + WATCH
 
 BB_PERIOD = 20
 BB_STD = 2.0
@@ -29,7 +50,7 @@ MAX_DEPTH = 25.0
 MIN_GAP_PCT = 0.5
 ATR_DAYS = 5
 
-SELL_STREAK_WARN = 2      # 法人連賣幾日視為風險
+SELL_STREAK_WARN = 2  # 法人連賣幾日視為風險
 
 
 def fm_query(dataset: str, data_id: str = "", start_date: str = "") -> list:
@@ -79,7 +100,6 @@ def get_margin(code: str, hist: list, days: int = 90) -> dict:
     margin = fm_query("TaiwanStockMarginPurchaseShortSale", code, start)
     if not margin or not hist:
         return {}
-
     price_map = {h["date"]: (h["high"] + h["low"] + h["close"] * 2) / 4 for h in hist}
     batches, prev = [], None
     for m in margin:
@@ -90,18 +110,14 @@ def get_margin(code: str, hist: list, days: int = 90) -> dict:
         if prev is not None and bal - prev > 0:
             batches.append({"add": bal - prev, "cost": price_map[d]})
         prev = bal
-
     if not batches:
         return {}
-
     total = sum(b["add"] for b in batches)
     avg_cost = sum(b["cost"] * b["add"] for b in batches) / total if total else 0
-
     recent = margin[-20:] if len(margin) >= 20 else margin
     rf = float(recent[0].get("MarginPurchaseTodayBalance") or 0)
     rl = float(recent[-1].get("MarginPurchaseTodayBalance") or 0)
     recent_change = ((rl - rf) / rf * 100) if rf else 0
-
     return {
         "avg_cost": avg_cost,
         "warn_price": avg_cost * LEVEL_WARN,
@@ -117,7 +133,6 @@ def get_flow(code: str, days: int = 12) -> dict:
     data = fm_query("TaiwanStockInstitutionalInvestorsBuySell", code, start)
     if not data:
         return {}
-
     by_date = {}
     for d in data:
         date = d.get("date")
@@ -130,10 +145,8 @@ def get_flow(code: str, days: int = 12) -> dict:
             e["trust"] += net
         elif name.startswith("Dealer"):
             e["dealer"] += net
-
     if not by_date:
         return {}
-
     dates = sorted(by_date.keys())
     last = by_date[dates[-1]]
 
@@ -193,7 +206,6 @@ def analyze_bb(hist: list) -> dict:
             bws.append(b["bw"])
     if len(bws) < 15:
         return {}
-
     window = bws[-120:] if len(bws) >= 120 else bws
     cur = calc_bb(closes)
     thr = percentile(window, SQUEEZE_PCT)
@@ -205,14 +217,12 @@ def analyze_bb(hist: list) -> dict:
             sq_days += 1
         else:
             break
-
     sq_before = 0
     for i in range(len(bws) - 2, -1, -1):
         if bws[i] <= thr:
             sq_before += 1
         else:
             break
-
     recent = bws[-6:-1] if len(bws) > 6 else bws[:-1]
     was_sq = in_sq or any(b <= thr for b in recent)
 
@@ -220,17 +230,14 @@ def analyze_bb(hist: list) -> dict:
     red = today["close"] > today["open"]
     body = (today["close"] - today["open"]) / today["open"] * 100 if today["open"] > 0 else 0
     vol_r = today["volume"] / prev["volume"] if prev["volume"] > 0 else 0
-
     prior = [h["high"] for h in hist[-11:-1]]
     brk_high = today["close"] > max(prior) if prior else False
     brk_up = today["close"] > cur["upper"]
     brk_down = today["close"] < cur["lower"]
     brk = brk_high or brk_up
-
     bw_rank = sum(1 for b in window if b < cur["bw"]) / len(window) * 100
     strong = red and body >= MIN_BODY_PCT
     diverge = vol_r >= DIVERGE_VOL and body < MIN_BODY_PCT
-
     span = cur["upper"] - cur["lower"]
     pos = ((today["close"] - cur["lower"]) / span * 100) if span > 0 else 50
 
@@ -256,6 +263,8 @@ def analyze_bb(hist: list) -> dict:
         "body": body, "vol_ratio": vol_r, "red": red,
         "break_high": brk_high, "break_upper": brk_up, "break_lower": brk_down,
         "signal": sig, "icon": icon, "rank": rank,
+        # 分位數樣本數：<120 表示資料不足，縮口判定可信度打折
+        "window_size": len(window),
     }
 
 
@@ -404,10 +413,10 @@ def analyze(code: str) -> dict:
         up, down = res[0]["pct"], abs(sup[0]["pct"])
         if down > 0:
             rr = up / down
-            if res[0]["estimated"]:
-                rr_conf = "low"
-            elif margin_pnl is not None and margin_pnl > 15:
-                rr_conf = "mid"
+        if res[0]["estimated"]:
+            rr_conf = "low"
+        elif margin_pnl is not None and margin_pnl > 15:
+            rr_conf = "mid"
 
     score = 0
     if flow:
@@ -439,6 +448,11 @@ def analyze(code: str) -> dict:
     if margin_pnl is not None and margin_pnl > 15:
         score -= 2
 
+    # 資料是否足以支撐縮口判定：分位樣本 <120 就標記
+    thin = bool(bb) and bb.get("window_size", 999) < 120
+    if _is_new_listing(code):
+        thin = True
+
     return {
         "code": code, "name": name, "close": cur, "chg": chg,
         "data_date": hist[-1]["date"],
@@ -447,6 +461,10 @@ def analyze(code: str) -> dict:
         "margin": margin, "margin_pnl": margin_pnl,
         "flow": flow, "bb": bb, "ladder": ladder,
         "rr": rr, "rr_conf": rr_conf, "score": score,
+        "category": _category(code),
+        "tier": "core" if code in CORE else "watch",
+        "thin_data": thin,
+        "bars": len(hist),
     }
 
 
@@ -454,15 +472,24 @@ def analyze_all(codes: list = None) -> list:
     codes = codes or WATCHLIST
     out = []
     for i, c in enumerate(codes, 1):
-        print(f"  [{i}/{len(codes)}] 分析 {c} ...")
+        tag = "核心" if c in CORE else "觀察"
+        print(f"  [{i}/{len(codes)}] 分析 {c} [{tag}] ...")
         r = analyze(c)
         if not r.get("error"):
             out.append(r)
         else:
-            print(f"     ⚠️ {r['error']}")
+            print(f"    ⚠️ {c} {r['error']}")
         time.sleep(0.4)
     out.sort(key=lambda x: -x["score"])
     return out
+
+
+def core_results(results: list) -> list:
+    return [a for a in results if a.get("tier") == "core"]
+
+
+def watch_results(results: list) -> list:
+    return [a for a in results if a.get("tier") != "core"]
 
 
 def verdict(a: dict) -> dict:
@@ -560,6 +587,12 @@ def pos_desc(pos: float) -> str:
     return "貼下軌"
 
 
+def cat_tag(a: dict) -> str:
+    """〔類別〕，沒有分類資料時回空字串。"""
+    c = a.get("category", "")
+    return f"〔{c}〕" if c else ""
+
+
 def action_hint(a: dict) -> str:
     bb = a.get("bb", {})
     rank = bb.get("rank", 9)
@@ -590,15 +623,18 @@ def format_card(a: dict) -> str:
     res = a["ladder"]["resistance"]
     sup = a["ladder"]["support"]
     v = verdict(a)
-
     sig_icon = bb.get("icon", "") or ""
-    lines.append(f"{v['icon']} {a['name']} {a['code']}  "
+
+    lines.append(f"{v['icon']} {a['name']} {a['code']}{cat_tag(a)} "
                  f"{a['close']:.1f}（{a['chg']:+.1f}%）{sig_icon}")
-    lines.append(f"   ▸ {v['text']}：{v['reason']}")
+    lines.append(f"  ▸ {v['text']}：{v['reason']}")
 
     hint = action_hint(a)
     if hint:
-        lines.append(f"   ▸ {hint}")
+        lines.append(f"  ▸ {hint}")
+
+    if a.get("thin_data"):
+        lines.append(f"  ▸ ⚠️ 僅{a.get('bars', 0)}根K線，縮口分位可信度低")
 
     if flow:
         parts = []
@@ -618,7 +654,7 @@ def format_card(a: dict) -> str:
             else:
                 s = ""
             parts.append(f"投{flow['trust']:+.0f}{s}")
-        lines.append(f"   籌碼 {' '.join(parts) if parts else '法人無動作'}")
+        lines.append(f"  籌碼 {' '.join(parts) if parts else '法人無動作'}")
 
     if bb:
         rank = bb.get("bw_rank", 50)
@@ -627,28 +663,28 @@ def format_card(a: dict) -> str:
             if bb["rank"] <= 1:
                 sq = bb["squeeze_before"] or bb["squeeze_days"]
                 tail = f" 壓縮{sq}日後" if sq else ""
-                lines.append(f"   {bb['signal']} 量{bb['vol_ratio']:.1f}倍 "
+                lines.append(f"  {bb['signal']} 量{bb['vol_ratio']:.1f}倍 "
                              f"K{bb['body']:+.1f}%{tail}")
             elif bb["rank"] in (2, 5):
-                lines.append(f"   {bb['signal']} 量{bb['vol_ratio']:.1f}倍 "
+                lines.append(f"  {bb['signal']} 量{bb['vol_ratio']:.1f}倍 "
                              f"K{bb['body']:+.1f}%")
             else:
-                lines.append(f"   {bb['signal']}{bb['squeeze_days']}日 "
+                lines.append(f"  {bb['signal']}{bb['squeeze_days']}日 "
                              f"上{bb['upper']:.1f}/下{bb['lower']:.1f}")
-        lines.append(f"   帶寬{bb.get('bw', 0):.1f}%（{bw_desc(rank)}·分位{rank:.0f}）"
+        lines.append(f"  帶寬{bb.get('bw', 0):.1f}%（{bw_desc(rank)}·分位{rank:.0f}）"
                      f"｜位置{pos_desc(pos)}")
 
     if res:
         mark = "※" if res[0].get("estimated") else ""
-        lines.append(f"   壓力 {res[0]['price']:.1f}（{res[0]['pct']:+.1f}%）{mark}")
+        lines.append(f"  壓力 {res[0]['price']:.1f}（{res[0]['pct']:+.1f}%）{mark}")
     if sup:
         s2 = f" 破→{sup[1]['price']:.1f}" if len(sup) >= 2 else ""
-        lines.append(f"   支撐 {sup[0]['price']:.1f}（{sup[0]['pct']:+.1f}%）{s2}")
+        lines.append(f"  支撐 {sup[0]['price']:.1f}（{sup[0]['pct']:+.1f}%）{s2}")
 
     if a.get("rr") is not None:
         rv, cf = a["rr"], a["rr_conf"]
         ic = "❓" if cf == "low" else "✅" if rv >= 1.5 else "⚠️" if rv < 0.8 else "➖"
-        lines.append(f"   盈虧比 1:{rv:.2f} {ic}")
+        lines.append(f"  盈虧比 1:{rv:.2f} {ic}")
 
     notes = []
     pnl = a.get("margin_pnl")
@@ -666,46 +702,95 @@ def format_card(a: dict) -> str:
         elif rc < -10:
             notes.append(f"融資{rc:+.0f}%籌碼沉澱")
     if notes:
-        lines.append(f"   {'｜'.join(notes)}")
+        lines.append(f"  {'｜'.join(notes)}")
 
     return "\n".join(lines)
 
 
+def _brief_line(a: dict, with_cat: bool = True) -> str:
+    rr = a.get("rr")
+    rr_s = f"1:{rr:.1f}" if rr is not None else "—"
+    sig = a.get("bb", {}).get("icon", "")
+    tag = cat_tag(a) if with_cat else ""
+    thin = "⚠️" if a.get("thin_data") else ""
+    return (f"  {a['name']}{a['code']}{tag} {a['close']:.1f} "
+            f"{a['chg']:+.1f}% ⚖️{rr_s} {sig}{thin}")
+
+
 def format_summary(results: list) -> str:
+    """核心名單速覽：依三級分類，每行帶產業類別。"""
     groups = {"watch": [], "hold": [], "avoid": []}
     for a in results:
         groups[verdict(a)["level"]].append(a)
 
-    lines = ["📋 今日名單速覽", "═" * 16]
-
+    lines = ["📋 核心名單速覽", "═" * 16]
     for key, title in [("watch", "🟢 可留意"), ("hold", "🟡 觀望"), ("avoid", "🔴 避開")]:
         items = groups[key]
         if not items:
             continue
         lines.append(f"{title}（{len(items)}）")
         for a in items:
+            lines.append(_brief_line(a))
+    return "\n".join(lines)
+
+
+def format_theme_summary(results: list) -> str:
+    """觀察名單速覽：依產業類別分組，每支一行。"""
+    if not results:
+        return ""
+    by_code = {a["code"]: a for a in results}
+    lines = ["🗂️ 觀察名單（依類別）", "═" * 16]
+    for cat, codes in _by_category(list(by_code.keys())):
+        members = [by_code[c] for c in codes if c in by_code]
+        if not members:
+            continue
+        members.sort(key=lambda x: -x["score"])
+        lines.append(f"【{cat or '未分類'}】")
+        for a in members:
+            v = verdict(a)
             rr = a.get("rr")
             rr_s = f"1:{rr:.1f}" if rr is not None else "—"
             sig = a.get("bb", {}).get("icon", "")
-            lines.append(f"  {a['name']}{a['code']} {a['close']:.1f} "
-                         f"{a['chg']:+.1f}% ⚖️{rr_s} {sig}")
+            thin = "⚠️" if a.get("thin_data") else ""
+            lines.append(f"  {v['icon']}{a['name']}{a['code']} {a['close']:.1f} "
+                         f"{a['chg']:+.1f}% ⚖️{rr_s} {sig}{thin}")
     return "\n".join(lines)
 
 
 def format_report(results: list) -> str:
-    lines = [format_summary(results), ""]
+    """
+    分層輸出：
+      核心 -> 速覽 + 完整個股詳情
+      觀察 -> 只出依類別分組的速覽
+    這樣 36 支的訊息長度仍可壓在 LINE 單則 4800 字內。
+    """
+    core = core_results(results)
+    watch = watch_results(results)
+
+    lines = [format_summary(core), ""]
     lines.append("═" * 16)
-    lines.append("📊 個股詳情")
+    lines.append("📊 核心個股詳情")
     lines.append("")
-    for a in results:
+    for a in core:
         lines.append(format_card(a))
         lines.append("")
+
+    if watch:
+        lines.append("═" * 16)
+        lines.append(format_theme_summary(watch))
+        lines.append("")
+        lines.append("（觀察名單不進盤中監控，僅每日盤前更新）")
+
     return "\n".join(lines)
 
 
 if __name__ == "__main__":
-    print("開始分析觀察名單...")
+    print(f"開始分析：核心 {len(CORE)} 支 / 觀察 {len(WATCH)} 支"
+          f"{'' if _HAS_CAT else '（未載入 categories.py，退回原名單）'}")
     rs = analyze_all()
     if rs:
         print(f"\n資料日期：{rs[0]['data_date']}（前一日 {rs[0]['prev_date']}）\n")
-    print(format_report(rs))
+        report = format_report(rs)
+        print(report)
+        print(f"\n--- 訊息長度 {len(report)} 字"
+              f"（LINE 單則上限 4800，超過會分段並多吃額度）---")
