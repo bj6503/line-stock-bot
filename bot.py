@@ -101,7 +101,6 @@ def build_message(results: list) -> str:
     dd = f"（資料日 {data_date[5:]}）" if data_date else ""
     lines = [f"📊 {now.strftime('%m/%d')} 盤前分析{dd}", ""]
     lines.append(format_report(results))
-    lines.append("⚠️ 僅供參考，請自行判斷風險")
     return "\n".join(lines)
 
 
