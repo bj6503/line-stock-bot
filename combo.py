@@ -207,7 +207,6 @@ def format_message(results: list, state: dict) -> str:
             lines.append(f"    {v['reason']}")
         lines.append("")
 
-    lines.append("⚠️ 僅供參考，請自行判斷風險")
     return "\n".join(lines)
 
 
